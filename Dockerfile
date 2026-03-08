@@ -16,6 +16,7 @@ FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         chromium \
+        git \
     && rm -rf /var/lib/apt/lists/*
 
 # chromiumoxide looks for "chromium" or "chromium-browser" on PATH
@@ -26,9 +27,12 @@ WORKDIR /app
 COPY --from=builder /app/target/release/skyclaw ./skyclaw
 COPY skyclaw.toml ./skyclaw.toml
 COPY SOUL.md ./SOUL.md
+COPY entrypoint.sh ./entrypoint.sh
+RUN chmod +x ./entrypoint.sh
 
 ENV TELEGRAM_BOT_TOKEN=""
+ENV GITHUB_TOKEN=""
 
 EXPOSE 8080
 
-ENTRYPOINT ["./skyclaw", "start"]
+ENTRYPOINT ["./entrypoint.sh"]
