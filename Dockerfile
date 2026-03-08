@@ -24,6 +24,7 @@ ENV CHROME_PATH=/usr/bin/chromium
 WORKDIR /app
 
 COPY --from=builder /app/target/release/skyclaw ./skyclaw
+COPY skyclaw.toml ./skyclaw.toml
 
 ENV TELEGRAM_BOT_TOKEN=""
 
