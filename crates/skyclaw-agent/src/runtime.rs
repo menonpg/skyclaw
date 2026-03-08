@@ -117,7 +117,7 @@ impl AgentRuntime {
                     chat_id: msg.chat_id.clone(),
                     text: "I received an empty message. Please send some text or a file.".to_string(),
                     reply_to: Some(msg.id.clone()),
-                    parse_mode: Some(ParseMode::Markdown),
+                    parse_mode: Some(ParseMode::Plain),
                 });
             }
         };
@@ -211,7 +211,7 @@ impl AgentRuntime {
                     chat_id: msg.chat_id.clone(),
                     text: reply_text,
                     reply_to: Some(msg.id.clone()),
-                    parse_mode: Some(ParseMode::Markdown),
+                    parse_mode: Some(ParseMode::Plain),
                 });
             }
 
@@ -301,7 +301,7 @@ impl AgentRuntime {
             chat_id: msg.chat_id.clone(),
             text,
             reply_to: Some(msg.id.clone()),
-            parse_mode: Some(ParseMode::Markdown),
+            parse_mode: Some(ParseMode::Plain),
         })
     }
 
