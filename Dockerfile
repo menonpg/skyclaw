@@ -11,7 +11,7 @@ COPY src/ src/
 RUN cargo build --release
 
 # ---- Runtime stage ----
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
