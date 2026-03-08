@@ -25,6 +25,7 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/skyclaw ./skyclaw
 COPY skyclaw.toml ./skyclaw.toml
+COPY SOUL.md ./SOUL.md
 
 ENV TELEGRAM_BOT_TOKEN=""
 

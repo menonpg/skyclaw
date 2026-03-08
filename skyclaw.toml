@@ -12,7 +12,10 @@ api_key = "${ANTHROPIC_API_KEY}"
 model = "claude-sonnet-4-6"
 
 [memory]
-backend = "sqlite"
+# Options: sqlite, markdown, soulmate
+# Use "soulmate" for RAG + RLM via The Menon Lab's soul.py infrastructure
+backend = "soulmate"
+path = "soulmate://ray/ray"  # customer_id/soul_id
 
 [memory.search]
 vector_weight = 0.7
