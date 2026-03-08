@@ -122,6 +122,9 @@ struct OpenAIToolCall {
     #[serde(rename = "type")]
     call_type: String,
     function: OpenAIFunctionCall,
+    /// Gemini 3 thought signature - required for multi-turn function calling
+    #[serde(default)]
+    thought_signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -163,6 +166,9 @@ struct OpenAIStreamToolCall {
     #[serde(rename = "type")]
     call_type: Option<String>,
     function: Option<OpenAIStreamFunctionCall>,
+    /// Gemini 3 thought signature
+    #[serde(default)]
+    thought_signature: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,11 +260,29 @@ fn convert_message_to_openai(msg: &ChatMessage) -> Result<serde_json::Value, Sky
                         ..
                     } = part
                     {
-                        tool_messages.push(serde_json::json!({
+                        // Extract Gemini thought_signature from encoded id if present
+                        // Format: "call_id__thought__signature"
+                        let (actual_id, thought_sig) = if tool_use_id.contains("__thought__") {
+                            let parts: Vec<&str> = tool_use_id.splitn(2, "__thought__").collect();
+                            (parts[0].to_string(), Some(parts.get(1).unwrap_or(&"").to_string()))
+                        } else {
+                            (tool_use_id.clone(), None)
+                        };
+                        
+                        let mut msg = serde_json::json!({
                             "role": "tool",
-                            "tool_call_id": tool_use_id,
+                            "tool_call_id": actual_id,
                             "content": content,
-                        }));
+                        });
+                        
+                        // Include thought_signature for Gemini 3 compatibility
+                        if let Some(sig) = thought_sig {
+                            if !sig.is_empty() {
+                                msg["thought_signature"] = serde_json::json!(sig);
+                            }
+                        }
+                        
+                        tool_messages.push(msg);
                     }
                 }
                 if tool_messages.len() == 1 {
@@ -392,8 +416,15 @@ impl Provider for OpenAICompatProvider {
                     serde_json::from_str(&tc.function.arguments).unwrap_or_else(|_| {
                         serde_json::Value::Object(serde_json::Map::new())
                     });
+                // Encode Gemini thought_signature into the id (LiteLLM pattern)
+                // Format: "call_id__thought__signature"
+                let encoded_id = if let Some(ref sig) = tc.thought_signature {
+                    format!("{}__thought__{}", tc.id, sig)
+                } else {
+                    tc.id
+                };
                 content.push(ContentPart::ToolUse {
-                    id: tc.id,
+                    id: encoded_id,
                     name: tc.function.name,
                     input,
                 });
@@ -590,7 +621,13 @@ fn extract_openai_sse_event(
                     }
 
                     if let Some(ref id) = tc.id {
-                        tool_calls[idx].0 = id.clone();
+                        // Encode Gemini thought_signature into id if present
+                        let encoded_id = if let Some(ref sig) = tc.thought_signature {
+                            format!("{}__thought__{}", id, sig)
+                        } else {
+                            id.clone()
+                        };
+                        tool_calls[idx].0 = encoded_id;
                     }
                     if let Some(ref func) = tc.function {
                         if let Some(ref name) = func.name {
