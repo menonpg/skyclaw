@@ -405,11 +405,32 @@ async fn handle_telegram_message(
     }
 
     // ── Reject non-allowlisted users ─────────────────────────────
+    // Rule: DMs = admin only, Groups = anyone in allowlist
     {
         let list = allowlist.read().unwrap();
-        if !list.iter().any(|a| a == &user_id) {
+        let is_in_allowlist = list.iter().any(|a| a == &user_id);
+        let is_admin = {
+            let adm = admin.read().unwrap();
+            adm.as_deref() == Some(&user_id)
+        };
+        let is_private = msg.chat.is_private();
+        
+        // In DMs: only admin allowed
+        // In groups: anyone in allowlist allowed
+        let allowed = if is_private {
+            is_admin
+        } else {
+            is_in_allowlist
+        };
+        
+        if !allowed {
             drop(list);
-            tracing::warn!(user_id = %user_id, username = ?username, "Rejected message from non-allowlisted user");
+            tracing::warn!(
+                user_id = %user_id,
+                username = ?username,
+                is_private = is_private,
+                "Rejected message from non-allowed user"
+            );
             return Ok(());
         }
     }

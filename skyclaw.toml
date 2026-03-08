@@ -57,5 +57,6 @@ otel_enabled = false
 [channel.telegram]
 enabled = true
 token = "${TELEGRAM_BOT_TOKEN}"
-allowlist = []
+# Prahlad (admin) = DMs + groups, Monica & Pi = groups only
+allowlist = ["1870707027", "8733394411", "8756119609"]
 file_transfer = true
