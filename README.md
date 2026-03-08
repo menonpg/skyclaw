@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.png" alt="SkyClaw" width="100%">
+</p>
+
 # SkyClaw
 
 Cloud-native Rust AI agent runtime. Telegram-native. One binary, zero config files.
