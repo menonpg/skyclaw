@@ -311,7 +311,24 @@ async fn main() -> Result<()> {
             );
             tracing::info!(count = tools.len(), "Tools initialized");
 
-            let system_prompt = Some(SYSTEM_PROMPT.to_string());
+            // Load SOUL.md from workspace if it exists, prepend to system prompt
+            let soul_content = {
+                let soul_paths = [
+                    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                        .join(".skyclaw/workspace/SOUL.md"),
+                    std::path::PathBuf::from("SOUL.md"),
+                ];
+                soul_paths
+                    .iter()
+                    .find_map(|p| std::fs::read_to_string(p).ok())
+                    .unwrap_or_default()
+            };
+            let system_prompt = if soul_content.is_empty() {
+                Some(SYSTEM_PROMPT.to_string())
+            } else {
+                Some(format!("{}\n\n---\n\n{}", soul_content, SYSTEM_PROMPT))
+            };
+            tracing::info!(has_soul = !soul_content.is_empty(), "System prompt configured");
 
             // ── Agent state (None during onboarding) ───────────
             let agent_state: Arc<tokio::sync::RwLock<Option<Arc<skyclaw_agent::AgentRuntime>>>> =

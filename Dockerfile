@@ -26,8 +26,8 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/skyclaw ./skyclaw
 COPY skyclaw.toml ./skyclaw.toml
-COPY SOUL.md ./SOUL.md
 COPY entrypoint.sh ./entrypoint.sh
+# SOUL.md is loaded from ray-workspace (git-synced, editable)
 RUN chmod +x ./entrypoint.sh
 
 ENV TELEGRAM_BOT_TOKEN=""
