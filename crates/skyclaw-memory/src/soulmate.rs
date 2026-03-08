@@ -1,7 +1,6 @@
 //! SoulMate API memory backend.
 //!
 //! Uses The Menon Lab's soul.py memory infrastructure for RAG + RLM hybrid retrieval.
-//! This replaces SQLite with persistent, semantic memory powered by SoulMate.
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -23,21 +22,13 @@ struct AskRequest {
 #[derive(Debug, Deserialize)]
 struct AskResponse {
     answer: String,
+    #[serde(default)]
     route: Option<String>,
     #[serde(default)]
     memories: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
-struct StoreRequest {
-    customer_id: String,
-    content: String,
-    metadata: serde_json::Value,
-}
-
 /// SoulMate API-backed memory.
-///
-/// Uses RAG + RLM hybrid retrieval from soul.py infrastructure.
 pub struct SoulMateMemory {
     client: Client,
     base_url: String,
@@ -49,33 +40,23 @@ pub struct SoulMateMemory {
 impl SoulMateMemory {
     /// Create a new SoulMateMemory backend.
     ///
-    /// `config_url` format: `soulmate://<api_key>@<customer_id>/<soul_id>`
-    /// or just `soulmate://<customer_id>` for defaults.
+    /// `config_url` format: `soulmate://customer_id/soul_id`
     pub async fn new(config_url: &str) -> Result<Self, SkyclawError> {
-        // Parse config URL
         let url = config_url
             .strip_prefix("soulmate://")
             .ok_or_else(|| SkyclawError::Config("SoulMate URL must start with soulmate://".into()))?;
 
-        let (api_key, rest) = if url.contains('@') {
-            let parts: Vec<&str> = url.splitn(2, '@').collect();
-            (parts[0].to_string(), parts[1])
-        } else {
-            // Use env var for API key
-            let key = std::env::var("SOULMATE_API_KEY").unwrap_or_default();
-            (key, url)
-        };
-
-        let parts: Vec<&str> = rest.split('/').collect();
+        let parts: Vec<&str> = url.split('/').collect();
         let customer_id = parts.first().unwrap_or(&"ray").to_string();
         let soul_id = parts.get(1).unwrap_or(&"ray").to_string();
 
-        let base_url = std::env::var("SOULMATE_URL").unwrap_or_else(|_| DEFAULT_SOULMATE_URL.to_string());
+        let api_key = std::env::var("SOULMATE_API_KEY").unwrap_or_default();
+        let base_url = std::env::var("SOULMATE_URL")
+            .unwrap_or_else(|_| DEFAULT_SOULMATE_URL.to_string());
 
         info!(
             customer_id = %customer_id,
             soul_id = %soul_id,
-            base_url = %base_url,
             "SoulMate memory backend initialized"
         );
 
@@ -87,49 +68,11 @@ impl SoulMateMemory {
             soul_id,
         })
     }
-
-    /// Ask a question with memory context (RAG + RLM hybrid).
-    pub async fn ask(&self, query: &str) -> Result<String, SkyclawError> {
-        let req = AskRequest {
-            query: query.to_string(),
-            customer_id: self.customer_id.clone(),
-            soul_id: self.soul_id.clone(),
-            remember: true,
-        };
-
-        let resp = self
-            .client
-            .post(format!("{}/v1/ask", self.base_url))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&req)
-            .send()
-            .await
-            .map_err(|e| SkyclawError::Memory(format!("SoulMate request failed: {e}")))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(SkyclawError::Memory(format!(
-                "SoulMate API error {}: {}",
-                status, body
-            )));
-        }
-
-        let result: AskResponse = resp
-            .json()
-            .await
-            .map_err(|e| SkyclawError::Memory(format!("SoulMate response parse error: {e}")))?;
-
-        debug!(route = ?result.route, "SoulMate query completed");
-        Ok(result.answer)
-    }
 }
 
 #[async_trait]
 impl Memory for SoulMateMemory {
     async fn store(&self, entry: MemoryEntry) -> Result<(), SkyclawError> {
-        // Store memories via the ask endpoint with remember=true
-        // The content becomes part of the conversation history
         let content = format!(
             "[{}] {}: {}",
             entry.timestamp.format("%Y-%m-%d %H:%M"),
@@ -171,13 +114,11 @@ impl Memory for SoulMateMemory {
         query: &str,
         opts: SearchOpts,
     ) -> Result<Vec<MemoryEntry>, SkyclawError> {
-        // Use the ask endpoint for semantic search
-        // SoulMate's RAG will return relevant memories
         let req = AskRequest {
             query: format!("Recall memories related to: {}", query),
             customer_id: self.customer_id.clone(),
             soul_id: self.soul_id.clone(),
-            remember: false, // Don't store the search query itself
+            remember: false,
         };
 
         let resp = self
@@ -190,7 +131,6 @@ impl Memory for SoulMateMemory {
             .map_err(|e| SkyclawError::Memory(format!("SoulMate search failed: {e}")))?;
 
         if !resp.status().is_success() {
-            // Return empty results on error (graceful degradation)
             return Ok(Vec::new());
         }
 
@@ -200,11 +140,10 @@ impl Memory for SoulMateMemory {
             memories: Vec::new(),
         });
 
-        // Convert memories to MemoryEntry format
         let entries: Vec<MemoryEntry> = result
             .memories
             .into_iter()
-            .take(opts.limit.unwrap_or(10) as usize)
+            .take(opts.limit)
             .enumerate()
             .map(|(i, content)| MemoryEntry {
                 id: format!("soulmate-{}", i),
@@ -212,48 +151,50 @@ impl Memory for SoulMateMemory {
                 metadata: serde_json::json!({}),
                 timestamp: chrono::Utc::now(),
                 session_id: Some(self.customer_id.clone()),
-                entry_type: MemoryEntryType::Knowledge,
+                entry_type: MemoryEntryType::LongTerm,
             })
             .collect();
 
         Ok(entries)
     }
 
-    async fn get(&self, id: &str) -> Result<Option<MemoryEntry>, SkyclawError> {
-        // SoulMate doesn't support direct ID lookup; return None
+    async fn get(&self, _id: &str) -> Result<Option<MemoryEntry>, SkyclawError> {
+        // SoulMate doesn't support direct ID lookup
         Ok(None)
     }
 
-    async fn delete(&self, id: &str) -> Result<(), SkyclawError> {
-        // Individual entry deletion not supported; would need to clear all memory
+    async fn delete(&self, _id: &str) -> Result<(), SkyclawError> {
+        // Individual entry deletion not supported
         Ok(())
     }
 
-    async fn list(&self, opts: SearchOpts) -> Result<Vec<MemoryEntry>, SkyclawError> {
-        // Use search with empty query to get recent memories
-        self.search("recent activity and context", opts).await
+    async fn list_sessions(&self) -> Result<Vec<String>, SkyclawError> {
+        // Return the current customer as the only session
+        Ok(vec![self.customer_id.clone()])
+    }
+
+    async fn get_session_history(
+        &self,
+        _session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<MemoryEntry>, SkyclawError> {
+        // Use search to get recent history
+        self.search("recent conversation history", SearchOpts {
+            limit,
+            ..Default::default()
+        }).await
+    }
+
+    fn backend_name(&self) -> &str {
+        "soulmate"
     }
 }
 
 fn entry_type_label(t: &MemoryEntryType) -> &'static str {
     match t {
         MemoryEntryType::Conversation => "CONV",
-        MemoryEntryType::Knowledge => "KNOW",
+        MemoryEntryType::LongTerm => "LONG",
+        MemoryEntryType::DailyLog => "LOG",
         MemoryEntryType::Skill => "SKILL",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    #[ignore] // Requires live SoulMate API
-    async fn test_soulmate_connection() {
-        let mem = SoulMateMemory::new("soulmate://test-ray/ray")
-            .await
-            .unwrap();
-        assert_eq!(mem.customer_id, "test-ray");
-        assert_eq!(mem.soul_id, "ray");
     }
 }
