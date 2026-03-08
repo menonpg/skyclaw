@@ -439,6 +439,13 @@ async fn handle_telegram_message(
     if let Some(text) = msg.text() {
         let trimmed = text.trim();
 
+
+        // /chatid — report the current chat ID (useful for anyone)
+        if trimmed == "/chatid" {
+            let reply_text = format!("Chat ID: {}", chat_id);
+            bot_reply(bot, chat_id, &reply_text).await?;
+            return Ok(());
+        }
         if trimmed.starts_with("/allow ")
             || trimmed.starts_with("/revoke ")
             || trimmed == "/users"
