@@ -566,6 +566,9 @@ async fn handle_telegram_message(
         timestamp: msg.date,
     };
 
+    // Send typing indicator while processing
+    let _ = bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
+
     tx.send(inbound).await.map_err(|_| {
         SkyclawError::Channel("Inbound message receiver dropped".into())
     })?;
