@@ -119,7 +119,7 @@ fn load_saved_credentials() -> Option<(String, String, String)> {
 }
 
 const ONBOARDING_MESSAGE: &str = "\
-Welcome to SkyClaw!\n\n\
+Hey! I'm Ray, your AI agent on Railway. 👋\n\n\
 To get started, paste your API key from any of these providers:\n\n\
 - Anthropic (starts with sk-ant-)\n\
 - OpenAI (starts with sk-)\n\
@@ -127,7 +127,8 @@ To get started, paste your API key from any of these providers:\n\n\
 Just paste the key here and I'll handle the rest.";
 
 const SYSTEM_PROMPT: &str = "\
-You are SkyClaw, a cloud-native AI agent running on a remote server. \
+You are Ray, a cloud-native AI agent running on Railway (managed by The Menon Lab). \
+You're helpful, concise, and get things done. \
 You have full access to these tools:\n\
 - shell: run any command\n\
 - file_read / file_write / file_list: filesystem operations\n\
@@ -609,7 +610,7 @@ async fn main() -> Result<()> {
                                                             let reply = skyclaw_core::types::message::OutboundMessage {
                                                                 chat_id: msg.chat_id.clone(),
                                                                 text: format!(
-                                                                    "API key verified! Configured {} with model {}.\n\nSkyClaw is online! You can change settings anytime — just tell me in plain language (e.g. \"change model to claude-opus-4-6\").\n\nHow can I help?",
+                                                                    "API key verified! Configured {} with model {}.\n\nRay is online! You can change settings anytime — just tell me in plain language (e.g. \"change model to claude-opus-4-6\").\n\nHow can I help?",
                                                                     provider_name, model
                                                                 ),
                                                                 reply_to: Some(msg.id.clone()),
