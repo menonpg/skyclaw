@@ -80,21 +80,21 @@ pub async fn build_context(
     }
     kept.reverse();
 
-    // Strip orphaned leading messages so the sequence is always valid for Anthropic:
-    // - Must start with Role::User (never Tool or Assistant)
-    // - A Role::Tool message must always be preceded by Role::Assistant with tool_use parts
-    // Stripping from the front is safe — we just lose some older context.
+    // Strip orphaned messages from the FRONT only.
+    // The sequence must start with Role::User — never with Tool or Assistant,
+    // which would have no matching prior context in the window.
+    // (Stripping from the front is safe: we just lose some older context.)
+    //
+    // NOTE: Do NOT strip from the trailing end. A Role::Tool at the end is
+    // valid inside the tool loop (Anthropic expects: assistant+tool_use →
+    // user+tool_results → assistant...). Stripping trailing Tool would expose
+    // the preceding Assistant+tool_use with no results, which is the error we
+    // are trying to avoid.
     while !kept.is_empty() {
         match kept[0].role {
             Role::User => break, // valid start
             _ => { kept.remove(0); } // drop orphaned Tool/Assistant at front
         }
-    }
-
-    // Also strip any trailing Role::Tool message with no following Assistant.
-    // This prevents ending on dangling tool_results when context is tight.
-    while kept.last().map(|m| matches!(m.role, Role::Tool)).unwrap_or(false) {
-        kept.pop();
     }
 
     messages.extend(kept);
