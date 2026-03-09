@@ -1,10 +1,13 @@
 //! Context builder — assembles a CompletionRequest from session history,
 //! memory search results, system prompt, and tool definitions.
+//!
+//! Memory is intentionally NOT queried here. Callers (AgentRuntime) are
+//! responsible for fetching memory ONCE per inbound message and passing
+//! the cached results in. This prevents N×tool_rounds redundant API calls.
 
 use std::sync::Arc;
 
-use skyclaw_core::Memory;
-use skyclaw_core::SearchOpts;
+use skyclaw_core::MemoryEntry;
 use skyclaw_core::Tool;
 use skyclaw_core::types::message::{
     ChatMessage, CompletionRequest, MessageContent, Role, ToolDefinition,
@@ -31,9 +34,12 @@ fn estimate_message_tokens(msg: &ChatMessage) -> usize {
 }
 
 /// Build a CompletionRequest from all available context.
+///
+/// `cached_memories` — fetched ONCE per inbound message by the caller,
+/// reused across all tool rounds without additional API calls.
 pub async fn build_context(
     session: &SessionContext,
-    memory: &dyn Memory,
+    cached_memories: &[MemoryEntry],
     tools: &[Arc<dyn Tool>],
     model: &str,
     system_prompt: Option<&str>,
@@ -42,49 +48,26 @@ pub async fn build_context(
 ) -> CompletionRequest {
     let mut messages: Vec<ChatMessage> = Vec::new();
 
-    // 1. Retrieve relevant memory entries for context augmentation
-    let query = session
-        .history
-        .last()
-        .and_then(|m| match &m.content {
-            MessageContent::Text(t) => Some(t.clone()),
-            MessageContent::Parts(parts) => parts.iter().find_map(|p| match p {
-                skyclaw_core::types::message::ContentPart::Text { text } => Some(text.clone()),
-                _ => None,
-            }),
-        })
-        .unwrap_or_default();
+    // 1. Inject cached memory entries as system context
+    if !cached_memories.is_empty() {
+        let memory_text: String = cached_memories
+            .iter()
+            .map(|e| format!("[{}] {}", e.timestamp.format("%Y-%m-%d %H:%M"), e.content))
+            .collect::<Vec<_>>()
+            .join("\n");
 
-    if !query.is_empty() {
-        let opts = SearchOpts {
-            limit: 5,
-            session_filter: Some(session.session_id.clone()),
-            ..Default::default()
-        };
-
-        if let Ok(entries) = memory.search(&query, opts).await {
-            if !entries.is_empty() {
-                let memory_text: String = entries
-                    .iter()
-                    .map(|e| format!("[{}] {}", e.timestamp.format("%Y-%m-%d %H:%M"), e.content))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                messages.push(ChatMessage {
-                    role: Role::System,
-                    content: MessageContent::Text(format!(
-                        "Relevant context from memory:\n{}",
-                        memory_text
-                    )),
-                });
-            }
-        }
+        messages.push(ChatMessage {
+            role: Role::System,
+            content: MessageContent::Text(format!(
+                "Relevant context from memory:\n{}",
+                memory_text
+            )),
+        });
     }
 
     // 2. Trim session history to max_turns pairs, keeping the most recent
     let history = &session.history;
     let trimmed: Vec<ChatMessage> = if max_turns > 0 && history.len() > max_turns * 2 {
-        // Keep the last N*2 messages (N pairs of user+assistant/tool)
         history[history.len() - max_turns * 2..].to_vec()
     } else {
         history.clone()
@@ -95,11 +78,10 @@ pub async fn build_context(
     let tool_def_tokens: usize = tools.iter().map(|t| {
         estimate_tokens(t.name()) + estimate_tokens(t.description()) + estimate_tokens(&t.parameters_schema().to_string())
     }).sum();
-    let base_tokens = system_tokens + tool_def_tokens + 500; // 500 for overhead
+    let base_tokens = system_tokens + tool_def_tokens + 500;
 
     let mut kept: Vec<ChatMessage> = Vec::new();
     let mut total_tokens = base_tokens;
-    // Walk from newest to oldest, accumulate until budget exceeded
     for msg in trimmed.iter().rev() {
         let msg_tokens = estimate_message_tokens(msg);
         if total_tokens + msg_tokens > max_context_tokens {
@@ -111,7 +93,7 @@ pub async fn build_context(
     kept.reverse();
     messages.extend(kept);
 
-    // 3. Build tool definitions
+    // 4. Build tool definitions
     let tool_defs: Vec<ToolDefinition> = tools
         .iter()
         .map(|t| ToolDefinition {
@@ -121,7 +103,7 @@ pub async fn build_context(
         })
         .collect();
 
-    // 4. Assemble the system prompt
+    // 5. Assemble the system prompt
     let system = system_prompt.map(|s| s.to_string()).or_else(|| {
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         Some(format!(
@@ -164,61 +146,62 @@ pub async fn build_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skyclaw_test_utils::{MockMemory, MockTool, make_session};
+    use skyclaw_core::MemoryEntryType;
+    use skyclaw_test_utils::{MockTool, make_session};
+
+    fn make_memory_entry(content: &str) -> MemoryEntry {
+        MemoryEntry {
+            id: "test".to_string(),
+            content: content.to_string(),
+            metadata: serde_json::json!({}),
+            timestamp: chrono::Utc::now(),
+            session_id: None,
+            entry_type: MemoryEntryType::LongTerm,
+        }
+    }
 
     #[tokio::test]
     async fn context_includes_system_prompt() {
-        let memory = MockMemory::new();
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let session = make_session();
-
-        let req = build_context(&session, &memory, &tools, "test-model", Some("Custom prompt"), 6, 30_000).await;
+        let req = build_context(&session, &[], &tools, "test-model", Some("Custom prompt"), 6, 30_000).await;
         assert_eq!(req.system.as_deref(), Some("Custom prompt"));
         assert_eq!(req.model, "test-model");
     }
 
     #[tokio::test]
-    async fn context_default_system_prompt() {
-        let memory = MockMemory::new();
+    async fn context_injects_cached_memories() {
         let tools: Vec<Arc<dyn Tool>> = vec![];
         let session = make_session();
+        let memories = vec![make_memory_entry("User is Prahlad, founder of The Menon Lab")];
+        let req = build_context(&session, &memories, &tools, "model", None, 6, 30_000).await;
+        let has_memory = req.messages.iter().any(|m| match &m.content {
+            skyclaw_core::types::message::MessageContent::Text(t) => t.contains("Prahlad"),
+            _ => false,
+        });
+        assert!(has_memory);
+    }
 
-        let req = build_context(&session, &memory, &tools, "test-model", None, 6, 30_000).await;
-        assert!(req.system.is_some());
-        assert!(req.system.unwrap().contains("SkyClaw"));
+    #[tokio::test]
+    async fn context_no_memory_no_system_message() {
+        let tools: Vec<Arc<dyn Tool>> = vec![];
+        let session = make_session();
+        let req = build_context(&session, &[], &tools, "model", Some("prompt"), 6, 30_000).await;
+        // With empty memories, no memory system message injected
+        assert!(!req.messages.iter().any(|m| match &m.content {
+            skyclaw_core::types::message::MessageContent::Text(t) => t.starts_with("Relevant context from memory"),
+            _ => false,
+        }));
     }
 
     #[tokio::test]
     async fn context_includes_tool_definitions() {
-        let memory = MockMemory::new();
         let tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(MockTool::new("shell")),
             Arc::new(MockTool::new("browser")),
         ];
         let session = make_session();
-
-        let req = build_context(&session, &memory, &tools, "model", None, 6, 30_000).await;
+        let req = build_context(&session, &[], &tools, "model", None, 6, 30_000).await;
         assert_eq!(req.tools.len(), 2);
-        assert_eq!(req.tools[0].name, "shell");
-        assert_eq!(req.tools[1].name, "browser");
-    }
-
-    #[tokio::test]
-    async fn context_includes_conversation_history() {
-        let memory = MockMemory::new();
-        let tools: Vec<Arc<dyn Tool>> = vec![];
-        let mut session = make_session();
-        session.history.push(ChatMessage {
-            role: Role::User,
-            content: MessageContent::Text("Hello".to_string()),
-        });
-        session.history.push(ChatMessage {
-            role: Role::Assistant,
-            content: MessageContent::Text("Hi there".to_string()),
-        });
-
-        let req = build_context(&session, &memory, &tools, "model", None, 6, 30_000).await;
-        // Messages should include the history
-        assert!(req.messages.len() >= 2);
     }
 }

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use skyclaw_core::{Memory, Provider, Tool};
+use skyclaw_core::{Memory, MemoryEntry, Provider, SearchOpts, Tool};
 use skyclaw_core::types::error::SkyclawError;
 use skyclaw_core::types::message::{
     ChatMessage, ContentPart, InboundMessage, MessageContent,
@@ -142,6 +142,28 @@ impl AgentRuntime {
             content: MessageContent::Text(user_text),
         });
 
+        // Fetch memory ONCE per inbound message — reused across all tool rounds.
+        // This prevents N×tool_rounds redundant SoulMate/Qdrant API calls.
+        let cached_memories: Vec<MemoryEntry> = {
+            let query = session.history.last()
+                .and_then(|m| match &m.content {
+                    skyclaw_core::types::message::MessageContent::Text(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+
+            if !query.is_empty() {
+                let opts = SearchOpts {
+                    limit: 8,
+                    session_filter: Some(session.session_id.clone()),
+                    ..Default::default()
+                };
+                self.memory.search(&query, opts).await.unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        };
+
         // Tool-use loop
         let mut rounds = 0;
         let mut interrupted = false;
@@ -165,7 +187,7 @@ impl AgentRuntime {
             // Build the completion request from full context
             let request = build_context(
                 session,
-                self.memory.as_ref(),
+                &cached_memories,
                 &self.tools,
                 &self.model,
                 self.system_prompt.as_deref(),
