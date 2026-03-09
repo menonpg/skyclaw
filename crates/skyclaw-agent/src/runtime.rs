@@ -210,7 +210,7 @@ impl AgentRuntime {
                 // Persist conversation turn to memory backend
                 // so Ray remembers across container restarts
                 let user_content = session.history.iter().rev()
-                    .find(|m| m.role == Role::User)
+                    .find(|m| matches!(m.role, Role::User))
                     .and_then(|m| match &m.content {
                         MessageContent::Text(t) => Some(t.clone()),
                         _ => None,
@@ -218,14 +218,15 @@ impl AgentRuntime {
                     .unwrap_or_default();
 
                 if !user_content.is_empty() {
-                    let mem_entry = skyclaw_core::MemoryEntry {
+                    use skyclaw_core::{MemoryEntry, MemoryEntryType};
+                    let mem_entry = MemoryEntry {
                         id: uuid::Uuid::new_v4().to_string(),
                         content: format!("User: {}
 Assistant: {}", user_content, reply_text),
                         metadata: serde_json::json!({"chat_id": msg.chat_id, "channel": msg.channel}),
                         timestamp: chrono::Utc::now(),
                         session_id: Some(session.session_id.clone()),
-                        entry_type: skyclaw_core::MemoryEntryType::Conversation,
+                        entry_type: MemoryEntryType::Conversation,
                     };
                     if let Err(e) = self.memory.store(mem_entry).await {
                         warn!("Failed to store memory: {}", e);
