@@ -347,6 +347,15 @@ Assistant: {}", user_content, reply_text),
             "I reached the maximum number of tool execution steps. Here is what I have so far. Please let me know if you need me to continue.".to_string()
         };
 
+        // CRITICAL: push the fallback as an actual assistant message in history.
+        // Without this, history ends with Role::Tool (tool_results), and the next
+        // user message creates two consecutive role:"user" messages, causing
+        // Anthropic 400 "unexpected tool_use_id in tool_result blocks".
+        session.history.push(ChatMessage {
+            role: Role::Assistant,
+            content: MessageContent::Text(text.clone()),
+        });
+
         Ok(OutboundMessage {
             chat_id: msg.chat_id.clone(),
             text,

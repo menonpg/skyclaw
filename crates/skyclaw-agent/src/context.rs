@@ -50,10 +50,13 @@ pub async fn build_context(
     // Note: cached_memories are injected into the system prompt below, not as messages
     // (Anthropic API does not allow role:system in the messages array)
 
-    // 2. Trim session history to max_turns pairs, keeping the most recent
+    // 2. Trim session history to max_turns pairs, keeping the most recent.
+    // Use max_turns * 3 slots (not *2) because tool exchanges are 3 messages:
+    // User → Assistant(tool_use) → Tool(tool_results) → Assistant(reply)
     let history = &session.history;
-    let trimmed: Vec<ChatMessage> = if max_turns > 0 && history.len() > max_turns * 2 {
-        history[history.len() - max_turns * 2..].to_vec()
+    let window = (max_turns * 3).max(6);
+    let trimmed: Vec<ChatMessage> = if max_turns > 0 && history.len() > window {
+        history[history.len() - window..].to_vec()
     } else {
         history.clone()
     };
@@ -76,6 +79,24 @@ pub async fn build_context(
         kept.push(msg.clone());
     }
     kept.reverse();
+
+    // Strip orphaned leading messages so the sequence is always valid for Anthropic:
+    // - Must start with Role::User (never Tool or Assistant)
+    // - A Role::Tool message must always be preceded by Role::Assistant with tool_use parts
+    // Stripping from the front is safe — we just lose some older context.
+    while !kept.is_empty() {
+        match kept[0].role {
+            Role::User => break, // valid start
+            _ => { kept.remove(0); } // drop orphaned Tool/Assistant at front
+        }
+    }
+
+    // Also strip any trailing Role::Tool message with no following Assistant.
+    // This prevents ending on dangling tool_results when context is tight.
+    while kept.last().map(|m| matches!(m.role, Role::Tool)).unwrap_or(false) {
+        kept.pop();
+    }
+
     messages.extend(kept);
 
     // 4. Build tool definitions
