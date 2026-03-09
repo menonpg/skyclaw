@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use anyhow::Result;
 use skyclaw_core::Channel;
 use tokio::sync::Mutex;
+use skyclaw_gateway::session::SessionManager;
 
 #[derive(Parser)]
 #[command(name = "skyclaw")]
@@ -386,6 +387,9 @@ async fn main() -> Result<()> {
                 .join("workspace");
             std::fs::create_dir_all(&workspace_path).ok();
 
+            // Session manager — persists conversation history across messages
+            let session_manager = Arc::new(SessionManager::new());
+
             // ── Heartbeat ──────────────────────────────────────
             if config.heartbeat.enabled {
                 let heartbeat_chat_id = config.heartbeat.report_to.clone()
@@ -426,6 +430,7 @@ async fn main() -> Result<()> {
                 let provider_base_url = config.provider.base_url.clone();
                 let ws_path = workspace_path.clone();
                 let pending_clone = pending_messages.clone();
+                let session_manager_clone = session_manager.clone();
 
                 let chat_slots: Arc<Mutex<HashMap<String, ChatSlot>>> =
                     Arc::new(Mutex::new(HashMap::new()));
@@ -506,6 +511,7 @@ async fn main() -> Result<()> {
                             let is_heartbeat_clone = is_heartbeat.clone();
                             let pending_for_worker = pending_clone.clone();
                             let worker_chat_id = chat_id.clone();
+                            let session_mgr_worker = session_manager_clone.clone();
 
                             tokio::spawn(async move {
                                 while let Some(mut msg) = chat_rx.recv().await {
@@ -555,30 +561,72 @@ async fn main() -> Result<()> {
                                             }
                                         }
 
-                                        let mut session = skyclaw_core::types::session::SessionContext {
-                                            session_id: format!("{}-{}", msg.channel, msg.chat_id),
-                                            user_id: msg.user_id.clone(),
-                                            channel: msg.channel.clone(),
-                                            chat_id: msg.chat_id.clone(),
-                                            history: Vec::new(),
-                                            workspace_path: workspace_path.clone(),
+                                        // Get or restore persistent session (survives across messages
+                                        // within the same container lifecycle)
+                                        let mut session = session_mgr_worker
+                                            .get_or_create_session(&msg.channel, &msg.chat_id, &msg.user_id)
+                                            .await;
+                                        session.workspace_path = workspace_path.clone();
+
+                                        // Handle slash commands before passing to agent
+                                        let slash_reply = {
+                                            let cmd = msg.text.as_deref()
+                                                .map(|t| t.trim().to_lowercase())
+                                                .unwrap_or_default();
+                                            let cmd = cmd.split_whitespace().next().unwrap_or("");
+                                            match cmd {
+                                                "/new" | "/reset" | "/clear" => {
+                                                    session_mgr_worker
+                                                        .remove_session(&msg.channel, &msg.chat_id, &msg.user_id)
+                                                        .await;
+                                                    tracing::info!(chat_id = %msg.chat_id, "Session reset by /new");
+                                                    Some(skyclaw_core::types::message::OutboundMessage {
+                                                        chat_id: msg.chat_id.clone(),
+                                                        text: "Session cleared. Fresh start — I've forgotten this conversation. Long-term memory (MEMORY.md) is still intact.".to_string(),
+                                                        reply_to: Some(msg.id.clone()),
+                                                        parse_mode: Some(skyclaw_core::types::message::ParseMode::Plain),
+                                                    })
+                                                }
+                                                "/help" => Some(skyclaw_core::types::message::OutboundMessage {
+                                                    chat_id: msg.chat_id.clone(),
+                                                    text: "Commands:\n/new — fresh conversation (clears context)\n/reset — same as /new\n/status — session info\n/help — this message".to_string(),
+                                                    reply_to: Some(msg.id.clone()),
+                                                    parse_mode: Some(skyclaw_core::types::message::ParseMode::Plain),
+                                                }),
+                                                "/status" => Some(skyclaw_core::types::message::OutboundMessage {
+                                                    chat_id: msg.chat_id.clone(),
+                                                    text: format!(
+                                                        "Session: {}\nChannel: {}\nMessages in context: {}\nType /new to clear.",
+                                                        session.session_id, msg.channel, session.history.len()
+                                                    ),
+                                                    reply_to: Some(msg.id.clone()),
+                                                    parse_mode: Some(skyclaw_core::types::message::ParseMode::Plain),
+                                                }),
+                                                _ => None,
+                                            }
                                         };
 
-                                        match agent.process_message(&msg, &mut session, interrupt_flag, Some(pending_for_worker.clone())).await {
-                                            Ok(reply) => {
-                                                if let Err(e) = sender.send_message(reply).await {
-                                                    tracing::error!(error = %e, "Failed to send reply");
+                                        if let Some(reply) = slash_reply {
+                                            let _ = sender.send_message(reply).await;
+                                        } else {
+                                            match agent.process_message(&msg, &mut session, interrupt_flag, Some(pending_for_worker.clone())).await {
+                                                Ok(reply) => {
+                                                    // Persist updated session history
+                                                    session_mgr_worker.update_session(session).await;
+                                                    if let Err(e) = sender.send_message(reply).await {
+                                                        tracing::error!(error = %e, "Failed to send reply");
+                                                    }
                                                 }
-                                            }
-                                            Err(e) => {
-                                                tracing::error!(error = %e, "Agent processing error");
-                                                let error_reply = skyclaw_core::types::message::OutboundMessage {
-                                                    chat_id: msg.chat_id.clone(),
-                                                    text: format!("Error: {}", e),
-                                                    reply_to: Some(msg.id.clone()),
-                                                    parse_mode: None,
-                                                };
-                                                let _ = sender.send_message(error_reply).await;
+                                                Err(e) => {
+                                                    tracing::error!(error = %e, "Agent processing error");
+                                                    let error_reply = skyclaw_core::types::message::OutboundMessage {
+                                                        chat_id: msg.chat_id.clone(),
+                                                        text: format!("Error: {}", e),
+                                                        reply_to: Some(msg.id.clone()),
+                                                        parse_mode: None,
+                                                    };
+                                                    let _ = sender.send_message(error_reply).await;
+                                                }
                                             }
                                         }
                                     } else {
