@@ -37,6 +37,9 @@ poise = { workspace = true, optional = true }
 # Optional: Slack & WhatsApp (also used by Telegram for file downloads)
 reqwest = { workspace = true, optional = true }
 
+# Markdown → Telegram HTML conversion
+pulldown-cmark = { version = "0.12", default-features = false }
+
 [dev-dependencies]
 skyclaw-test-utils.workspace = true
 tempfile = "3"

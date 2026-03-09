@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use skyclaw_core::types::config::ChannelConfig;
 use skyclaw_core::types::error::SkyclawError;
 use skyclaw_core::types::file::{FileData, FileMetadata, OutboundFile, ReceivedFile};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, CodeBlockKind};
 use skyclaw_core::types::message::{AttachmentRef, InboundMessage, OutboundMessage, ParseMode};
 use skyclaw_core::{Channel, FileTransfer};
 
@@ -225,21 +226,32 @@ impl Channel for TelegramChannel {
             .map(ChatId)
             .map_err(|_| SkyclawError::Channel(format!("Invalid chat_id: {}", msg.chat_id)))?;
 
-        let mut request = bot.send_message(chat_id, &msg.text);
+        // Always convert markdown → Telegram HTML, then send with HTML parse mode.
+        // If Telegram rejects (malformed HTML, unsupported tags, etc.), fall back to plain text.
+        let html_text = markdown_to_telegram_html(&msg.text);
 
-        if let Some(ref mode) = msg.parse_mode {
-            request = match mode {
-                ParseMode::Markdown => request.parse_mode(teloxide::types::ParseMode::MarkdownV2),
-                ParseMode::Html => request.parse_mode(teloxide::types::ParseMode::Html),
-                ParseMode::Plain => request,
-            };
+        let result = bot
+            .send_message(chat_id, &html_text)
+            .parse_mode(teloxide::types::ParseMode::Html)
+            .await;
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // Fallback: send as plain text (strips all formatting)
+                tracing::warn!(
+                    chat_id = %msg.chat_id,
+                    error = %e,
+                    "HTML send failed, retrying as plain text"
+                );
+                bot.send_message(chat_id, &msg.text)
+                    .await
+                    .map_err(|e2| SkyclawError::Channel(
+                        format!("Failed to send Telegram message: {e2}")
+                    ))?;
+                Ok(())
+            }
         }
-
-        request.await.map_err(|e| {
-            SkyclawError::Channel(format!("Failed to send Telegram message: {e}"))
-        })?;
-
-        Ok(())
     }
 
     fn file_transfer(&self) -> Option<&dyn FileTransfer> {
@@ -643,4 +655,113 @@ fn extract_attachments(msg: &teloxide::types::Message) -> Vec<AttachmentRef> {
     }
 
     attachments
+}
+
+// ── Markdown → Telegram HTML conversion ──────────────────────────────────────
+
+/// Escape text for use in Telegram HTML mode.
+/// Telegram requires &, <, > to be escaped in plain text nodes.
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Convert standard markdown to Telegram-safe HTML.
+///
+/// Telegram's HTML mode supports only: <b>, <i>, <u>, <s>, <code>, <pre>,
+/// <a href="...">, <tg-spoiler>, <blockquote>.
+/// All plain text is HTML-escaped so < > & never break the parser.
+pub fn markdown_to_telegram_html(markdown: &str) -> String {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TABLES);
+
+    let parser = Parser::new_ext(markdown, options);
+    let mut output = String::with_capacity(markdown.len() * 2);
+    let mut in_code_block = false;
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Paragraph) => {}
+            Event::End(TagEnd::Paragraph) => {
+                output.push_str("\n\n");
+            }
+
+            Event::Start(Tag::Heading { .. }) => {
+                output.push_str("<b>");
+            }
+            Event::End(TagEnd::Heading(..)) => {
+                output.push_str("</b>\n\n");
+            }
+
+            Event::Start(Tag::Strong) => output.push_str("<b>"),
+            Event::End(TagEnd::Strong) => output.push_str("</b>"),
+
+            Event::Start(Tag::Emphasis) => output.push_str("<i>"),
+            Event::End(TagEnd::Emphasis) => output.push_str("</i>"),
+
+            Event::Start(Tag::Strikethrough) => output.push_str("<s>"),
+            Event::End(TagEnd::Strikethrough) => output.push_str("</s>"),
+
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                output.push_str(&format!("<a href=\"{}\">", escape_html(&dest_url)));
+            }
+            Event::End(TagEnd::Link) => output.push_str("</a>"),
+
+            Event::Start(Tag::CodeBlock(kind)) => {
+                in_code_block = true;
+                match kind {
+                    CodeBlockKind::Fenced(lang) if !lang.is_empty() => {
+                        output.push_str(&format!(
+                            "<pre><code class=\"language-{}\">",
+                            escape_html(&lang)
+                        ));
+                    }
+                    _ => output.push_str("<pre><code>"),
+                }
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                in_code_block = false;
+                output.push_str("</code></pre>\n");
+            }
+
+            Event::Code(text) => {
+                output.push_str(&format!("<code>{}</code>", escape_html(&text)));
+            }
+
+            Event::Start(Tag::List(None)) | Event::End(TagEnd::List(false)) => {}
+            Event::Start(Tag::List(Some(_))) | Event::End(TagEnd::List(true)) => {}
+            Event::Start(Tag::Item) => output.push_str("• "),
+            Event::End(TagEnd::Item) => output.push('\n'),
+
+            Event::Start(Tag::BlockQuote(..)) => output.push_str("<blockquote>"),
+            Event::End(TagEnd::BlockQuote(..)) => output.push_str("</blockquote>\n"),
+
+            Event::Text(text) => {
+                if in_code_block {
+                    output.push_str(&escape_html(&text));
+                } else {
+                    output.push_str(&escape_html(&text));
+                }
+            }
+
+            Event::SoftBreak => output.push('\n'),
+            Event::HardBreak => output.push_str("\n\n"),
+
+            Event::Rule => output.push_str("\n──────────\n"),
+
+            // Tables: flatten to plain text rows
+            Event::Start(Tag::Table(..)) | Event::End(TagEnd::Table) => {}
+            Event::Start(Tag::TableHead) | Event::End(TagEnd::TableHead) => {}
+            Event::Start(Tag::TableRow) | Event::End(TagEnd::TableRow) => output.push('\n'),
+            Event::Start(Tag::TableCell) => {}
+            Event::End(TagEnd::TableCell) => output.push_str("  |  "),
+
+            _ => {}
+        }
+    }
+
+    // Trim trailing whitespace
+    output.trim_end().to_string()
 }

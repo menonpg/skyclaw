@@ -91,6 +91,7 @@ regex = "1"
 base64 = "0.22"
 dirs = "6"
 pin-project-lite = "0.2"
+pulldown-cmark = { version = "0.12", default-features = false }
 tokio-stream = "0.1"
 
 # Internal crates
