@@ -277,6 +277,12 @@ async fn main() -> Result<()> {
                 std::fs::create_dir_all(&data_dir).ok();
                 format!("sqlite:{}/memory.db?mode=rwc", data_dir.display())
             });
+            // If config specifies a memory api_key, inject it into env so backends can read it
+            if let Some(ref key) = config.memory.api_key {
+                if !key.is_empty() {
+                    std::env::set_var("SOULMATE_API_KEY", key);
+                }
+            }
             let memory: Arc<dyn skyclaw_core::Memory> = Arc::from(
                 skyclaw_memory::create_memory_backend(&config.memory.backend, &memory_url).await?
             );

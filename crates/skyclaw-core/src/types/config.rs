@@ -112,6 +112,7 @@ pub struct MemoryConfig {
     pub backend: String,
     pub path: Option<String>,
     pub connection_string: Option<String>,
+    pub api_key: Option<String>,
     #[serde(default)]
     pub search: SearchConfig,
 }
@@ -122,6 +123,7 @@ impl Default for MemoryConfig {
             backend: "sqlite".to_string(),
             path: None,
             connection_string: None,
+            api_key: None,
             search: SearchConfig::default(),
         }
     }

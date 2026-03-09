@@ -16,6 +16,7 @@ model = "claude-sonnet-4-6"
 # Use "soulmate" for RAG + RLM via The Menon Lab's soul.py infrastructure
 backend = "soulmate"
 path = "soulmate://ray/ray"  # customer_id/soul_id
+api_key = "${SOULMATE_API_KEY}"
 
 [memory.search]
 vector_weight = 0.7
