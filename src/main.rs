@@ -158,13 +158,7 @@ Your config lives at ~/.skyclaw/credentials.toml (provider, api_key, model). \
 You can read and edit this file to change your own settings. For example, \
 if the user says 'change model to claude-opus-4-6', edit credentials.toml \
 and confirm. Changes take effect on next restart. Tell the user they can \
-configure you through natural language — just ask.\n\n\
-FORMATTING (Telegram HTML mode):\n\
-Responses are rendered as Telegram HTML — use HTML tags, never markdown syntax.\n\
-Bold: <b>text</b> | Italic: <i>text</i> | Inline code: <code>text</code>\n\
-Code block: <pre>code here</pre>\n\
-Do NOT use **bold**, `backticks`, _italic_, or # headers — they show as literal characters.\n\
-Keep formatting minimal. Only use it when it genuinely helps readability.";
+configure you through natural language — just ask.";
 
 // ── Stop-command detection ─────────────────────────────────
 fn is_stop_command(text: &str) -> bool {
