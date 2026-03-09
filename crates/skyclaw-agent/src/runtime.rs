@@ -239,7 +239,7 @@ Assistant: {}", user_content, reply_text),
                     chat_id: msg.chat_id.clone(),
                     text: reply_text,
                     reply_to: Some(msg.id.clone()),
-                    parse_mode: Some(ParseMode::Plain),
+                    parse_mode: Some(ParseMode::Html),
                 });
             }
 
