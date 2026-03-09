@@ -26,6 +26,8 @@ struct AskRequest {
     customer_id: String,
     soul_id: String,
     remember: bool,
+    llm_provider: String,
+    llm_key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +52,7 @@ pub struct SoulMateMemory {
     client: Client,
     base_url: String,
     api_key: String,
+    llm_key: String,
     customer_id: String,
     soul_id: String,
 }
@@ -71,6 +74,8 @@ impl SoulMateMemory {
             warn!("SOULMATE_API_KEY is not set — all memory calls will fail with 401. \
                    Set this env var in Railway.");
         }
+        // Pass the agent's own LLM key so SoulMate can make LLM calls server-side
+        let llm_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
 
         let base_url = std::env::var("SOULMATE_URL")
             .unwrap_or_else(|_| DEFAULT_SOULMATE_URL.to_string());
@@ -82,7 +87,7 @@ impl SoulMateMemory {
             "SoulMate memory backend initialized"
         );
 
-        Ok(Self { client: Client::new(), base_url, api_key, customer_id, soul_id })
+        Ok(Self { client: Client::new(), base_url, api_key, llm_key, customer_id, soul_id })
     }
 
     fn auth_header(&self) -> String {
@@ -106,6 +111,8 @@ impl Memory for SoulMateMemory {
             customer_id: self.customer_id.clone(),
             soul_id:     self.soul_id.clone(),
             remember:    true,
+            llm_provider: "anthropic".to_string(),
+            llm_key:     self.llm_key.clone(),
         };
 
         let resp = self
