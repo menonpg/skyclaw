@@ -37,12 +37,19 @@ impl AnthropicProvider {
         request: &CompletionRequest,
         stream: bool,
     ) -> Result<serde_json::Value, SkyclawError> {
-        let messages = request
+        let raw_messages = request
             .messages
             .iter()
             .filter(|m| !matches!(m.role, Role::System))
             .map(|m| convert_message_to_anthropic(m))
             .collect::<Result<Vec<_>, _>>()?;
+
+        // Sanitize the message sequence before sending to Anthropic.
+        // Defends against any history corruption that slips through context.rs:
+        //  1. Drop orphaned assistant+tool_use not immediately followed by user+tool_result
+        //  2. Merge consecutive same-role messages (Anthropic requires strict alternation)
+        //  3. Ensure sequence starts with "user"
+        let messages = sanitize_anthropic_messages(raw_messages);
 
         let mut body = serde_json::json!({
             "model": request.model,
@@ -153,6 +160,94 @@ struct AnthropicMessageDeltaBody {
 // ---------------------------------------------------------------------------
 // Conversion helpers
 // ---------------------------------------------------------------------------
+
+/// Sanitize a converted Anthropic message array so it never violates API constraints:
+///
+/// 1. Every `assistant` message whose `content` array contains a `tool_use` block MUST be
+///    immediately followed by a `user` message whose `content` array contains matching
+///    `tool_result` blocks.  Any orphaned tool_use (no tool_result follows) is dropped.
+///
+/// 2. Anthropic requires strict role alternation: no two consecutive messages may share
+///    the same role.  Consecutive `user` messages are merged; consecutive `assistant`
+///    messages are merged (the latter shouldn't happen in practice but we guard it).
+///
+/// 3. The sequence must start with `user`.  Leading non-user messages are stripped.
+fn sanitize_anthropic_messages(mut msgs: Vec<serde_json::Value>) -> Vec<serde_json::Value> {
+    // Pass 1: drop orphaned assistant+tool_use messages.
+    // An assistant message is "tool_use" if any content block has type=="tool_use".
+    let mut i = 0;
+    while i < msgs.len() {
+        let is_tool_use_assistant = msgs[i]["role"] == "assistant"
+            && msgs[i]["content"]
+                .as_array()
+                .map_or(false, |parts| parts.iter().any(|p| p["type"] == "tool_use"));
+
+        if is_tool_use_assistant {
+            // Check that the very next message is a user message with tool_result blocks.
+            let next_ok = msgs.get(i + 1).map_or(false, |next| {
+                next["role"] == "user"
+                    && next["content"]
+                        .as_array()
+                        .map_or(false, |parts| parts.iter().any(|p| p["type"] == "tool_result"))
+            });
+            if !next_ok {
+                // Drop this orphaned tool_use and also skip the immediately following
+                // tool_result message if it somehow exists at a wrong position.
+                tracing::warn!(
+                    "sanitize_anthropic_messages: dropping orphaned assistant+tool_use at index {}",
+                    i
+                );
+                msgs.remove(i);
+                // Don't advance i — re-check what is now at position i.
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    // Pass 2: merge consecutive same-role messages.
+    // Anthropic requires strict user/assistant alternation.
+    let mut merged: Vec<serde_json::Value> = Vec::new();
+    for msg in msgs {
+        if let Some(last) = merged.last_mut() {
+            if last["role"] == msg["role"] {
+                tracing::warn!(
+                    "sanitize_anthropic_messages: merging consecutive {:?} messages",
+                    msg["role"]
+                );
+                // Merge content arrays (or wrap strings into text blocks).
+                let last_content = last["content"].take();
+                let new_content = msg["content"].clone();
+
+                let mut blocks: Vec<serde_json::Value> = Vec::new();
+                match last_content {
+                    serde_json::Value::String(s) => blocks.push(serde_json::json!({"type":"text","text":s})),
+                    serde_json::Value::Array(arr) => blocks.extend(arr),
+                    other => blocks.push(serde_json::json!({"type":"text","text":other.to_string()})),
+                }
+                match new_content {
+                    serde_json::Value::String(s) => blocks.push(serde_json::json!({"type":"text","text":s})),
+                    serde_json::Value::Array(arr) => blocks.extend(arr),
+                    other => blocks.push(serde_json::json!({"type":"text","text":other.to_string()})),
+                }
+                last["content"] = serde_json::Value::Array(blocks);
+                continue;
+            }
+        }
+        merged.push(msg);
+    }
+
+    // Pass 3: ensure sequence starts with "user".
+    while !merged.is_empty() && merged[0]["role"] != "user" {
+        tracing::warn!(
+            "sanitize_anthropic_messages: dropping leading {:?} message",
+            merged[0]["role"]
+        );
+        merged.remove(0);
+    }
+
+    merged
+}
 
 fn convert_message_to_anthropic(msg: &ChatMessage) -> Result<serde_json::Value, SkyclawError> {
     let role = match msg.role {
