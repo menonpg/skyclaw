@@ -47,23 +47,8 @@ pub async fn build_context(
     max_context_tokens: usize,
 ) -> CompletionRequest {
     let mut messages: Vec<ChatMessage> = Vec::new();
-
-    // 1. Inject cached memory entries as system context
-    if !cached_memories.is_empty() {
-        let memory_text: String = cached_memories
-            .iter()
-            .map(|e| format!("[{}] {}", e.timestamp.format("%Y-%m-%d %H:%M"), e.content))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        messages.push(ChatMessage {
-            role: Role::System,
-            content: MessageContent::Text(format!(
-                "Relevant context from memory:\n{}",
-                memory_text
-            )),
-        });
-    }
+    // Note: cached_memories are injected into the system prompt below, not as messages
+    // (Anthropic API does not allow role:system in the messages array)
 
     // 2. Trim session history to max_turns pairs, keeping the most recent
     let history = &session.history;
@@ -103,8 +88,19 @@ pub async fn build_context(
         })
         .collect();
 
-    // 5. Assemble the system prompt
-    let system = system_prompt.map(|s| s.to_string()).or_else(|| {
+    // 5. Assemble the system prompt — prepend relevant memories if any
+    let memory_prefix = if !cached_memories.is_empty() {
+        let lines: String = cached_memories
+            .iter()
+            .map(|e| format!("- [{}] {}", e.timestamp.format("%Y-%m-%d"), e.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("Relevant context from memory:\n{}\n\n---\n\n", lines)
+    } else {
+        String::new()
+    };
+
+    let system = system_prompt.map(|s| format!("{}{}", memory_prefix, s)).or_else(|| {
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         Some(format!(
             "You are SkyClaw, a cloud-native AI agent runtime. You control a computer through messaging apps.\n\
