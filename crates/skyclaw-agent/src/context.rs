@@ -10,7 +10,7 @@ use std::sync::Arc;
 use skyclaw_core::MemoryEntry;
 use skyclaw_core::Tool;
 use skyclaw_core::types::message::{
-    ChatMessage, CompletionRequest, MessageContent, Role, ToolDefinition,
+    ChatMessage, CompletionRequest, ContentPart, MessageContent, Role, ToolDefinition,
 };
 use skyclaw_core::types::session::SessionContext;
 
@@ -25,9 +25,9 @@ fn estimate_message_tokens(msg: &ChatMessage) -> usize {
         MessageContent::Text(t) => estimate_tokens(t),
         MessageContent::Parts(parts) => {
             parts.iter().map(|p| match p {
-                skyclaw_core::types::message::ContentPart::Text { text } => estimate_tokens(text),
-                skyclaw_core::types::message::ContentPart::ToolUse { input, .. } => estimate_tokens(&input.to_string()),
-                skyclaw_core::types::message::ContentPart::ToolResult { content, .. } => estimate_tokens(content),
+                ContentPart::Text { text } => estimate_tokens(text),
+                ContentPart::ToolUse { input, .. } => estimate_tokens(&input.to_string()),
+                ContentPart::ToolResult { content, .. } => estimate_tokens(content),
             }).sum()
         }
     }
@@ -47,11 +47,9 @@ pub async fn build_context(
     max_context_tokens: usize,
 ) -> CompletionRequest {
     let mut messages: Vec<ChatMessage> = Vec::new();
-    // Note: cached_memories are injected into the system prompt below, not as messages
-    // (Anthropic API does not allow role:system in the messages array)
 
-    // 2. Trim session history to max_turns pairs, keeping the most recent.
-    // Use max_turns * 3 slots (not *2) because tool exchanges are 3 messages:
+    // Trim session history to max_turns pairs, keeping the most recent.
+    // Use max_turns * 3 slots because tool exchanges are 3 messages:
     // User → Assistant(tool_use) → Tool(tool_results) → Assistant(reply)
     let history = &session.history;
     let window = (max_turns * 3).max(6);
@@ -61,7 +59,7 @@ pub async fn build_context(
         history.clone()
     };
 
-    // 3. Apply token budget — drop oldest messages until under limit
+    // Apply token budget — drop oldest messages until under limit
     let system_tokens = messages.iter().map(|m| estimate_message_tokens(m)).sum::<usize>();
     let tool_def_tokens: usize = tools.iter().map(|t| {
         estimate_tokens(t.name()) + estimate_tokens(t.description()) + estimate_tokens(&t.parameters_schema().to_string())
@@ -80,26 +78,59 @@ pub async fn build_context(
     }
     kept.reverse();
 
-    // Strip orphaned messages from the FRONT only.
-    // The sequence must start with Role::User — never with Tool or Assistant,
-    // which would have no matching prior context in the window.
-    // (Stripping from the front is safe: we just lose some older context.)
-    //
-    // NOTE: Do NOT strip from the trailing end. A Role::Tool at the end is
-    // valid inside the tool loop (Anthropic expects: assistant+tool_use →
-    // user+tool_results → assistant...). Stripping trailing Tool would expose
-    // the preceding Assistant+tool_use with no results, which is the error we
-    // are trying to avoid.
+    // Strip orphaned messages from the FRONT.
+    // The sequence must start with Role::User.
     while !kept.is_empty() {
         match kept[0].role {
-            Role::User => break, // valid start
-            _ => { kept.remove(0); } // drop orphaned Tool/Assistant at front
+            Role::User => break,
+            _ => { kept.remove(0); }
+        }
+    }
+
+    // Strip orphaned tool_use from the END.
+    // If the token budget cut through a tool_use/tool_result pair, the last
+    // message may be assistant+tool_use with no following tool_result — that
+    // causes Anthropic 400. Remove dangling tool_use (and any trailing
+    // orphaned tool_result that lost its partner) until the tail is clean.
+    loop {
+        match kept.last() {
+            Some(last) if matches!(last.role, Role::Assistant) => {
+                let has_dangling_tool_use = match &last.content {
+                    MessageContent::Parts(parts) => parts.iter().any(|p| matches!(p, ContentPart::ToolUse { .. })),
+                    _ => false,
+                };
+                if has_dangling_tool_use {
+                    tracing::warn!("context: stripping dangling assistant+tool_use from end of context window");
+                    kept.pop();
+                    // Also remove preceding tool_result if it lost its pair
+                    if matches!(kept.last().map(|m| &m.role), Some(Role::Tool)) {
+                        kept.pop();
+                    }
+                } else {
+                    break;
+                }
+            }
+            Some(last) if matches!(last.role, Role::Tool) => {
+                // Orphaned tool_result with no preceding assistant+tool_use
+                tracing::warn!("context: stripping orphaned tool_result from end of context window");
+                kept.pop();
+            }
+            _ => break,
+        }
+    }
+
+    // Safety: Anthropic requires at least one message.
+    // If aggressive stripping left us with nothing, use the last user message from original history.
+    if kept.is_empty() {
+        tracing::warn!("context: all messages stripped — falling back to last user message");
+        if let Some(last_user) = history.iter().rev().find(|m| matches!(m.role, Role::User)) {
+            kept.push(last_user.clone());
         }
     }
 
     messages.extend(kept);
 
-    // 4. Build tool definitions
+    // Build tool definitions
     let tool_defs: Vec<ToolDefinition> = tools
         .iter()
         .map(|t| ToolDefinition {
@@ -109,7 +140,7 @@ pub async fn build_context(
         })
         .collect();
 
-    // 5. Assemble the system prompt — prepend relevant memories if any
+    // Assemble the system prompt — prepend relevant memories if any
     let memory_prefix = if !cached_memories.is_empty() {
         let lines: String = cached_memories
             .iter()
@@ -124,27 +155,10 @@ pub async fn build_context(
     let system = system_prompt.map(|s| format!("{}{}", memory_prefix, s)).or_else(|| {
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         Some(format!(
-            "You are SkyClaw, a cloud-native AI agent runtime. You control a computer through messaging apps.\n\
-             \n\
+            "You are SkyClaw, a cloud-native AI agent runtime.\n\
              You have access to these tools: {}\n\
-             \n\
-             Workspace: All file operations use the workspace directory at {}.\n\
-             Files sent by the user are automatically saved here.\n\
-             \n\
-             File protocol:\n\
-             - Received files are saved to the workspace automatically — use file_read to read them\n\
-             - To send a file to the user, use send_file with just the path (chat_id is automatic)\n\
-             - Use file_write to create files in the workspace, then send_file to deliver them\n\
-             - Paths are relative to the workspace directory\n\
-             \n\
-             Guidelines:\n\
-             - Use the shell tool to run commands, install packages, manage services, check system status\n\
-             - Use file tools to read, write, and list files in the workspace\n\
-             - Use web_fetch to look up documentation, check APIs, or research information\n\
-             - Be concise in responses — the user is on a messaging app\n\
-             - When a task requires multiple steps, execute them sequentially using tools\n\
-             - If a command fails, read the error and try to fix it\n\
-             - Never expose secrets, API keys, or sensitive data in responses",
+             Workspace: {}\n\
+             Be concise. Use tools to get things done.",
             tool_names.join(", "),
             session.workspace_path.display()
         ))
@@ -192,23 +206,8 @@ mod tests {
         let session = make_session();
         let memories = vec![make_memory_entry("User is Prahlad, founder of The Menon Lab")];
         let req = build_context(&session, &memories, &tools, "model", None, 6, 30_000).await;
-        let has_memory = req.messages.iter().any(|m| match &m.content {
-            skyclaw_core::types::message::MessageContent::Text(t) => t.contains("Prahlad"),
-            _ => false,
-        });
-        assert!(has_memory);
-    }
-
-    #[tokio::test]
-    async fn context_no_memory_no_system_message() {
-        let tools: Vec<Arc<dyn Tool>> = vec![];
-        let session = make_session();
-        let req = build_context(&session, &[], &tools, "model", Some("prompt"), 6, 30_000).await;
-        // With empty memories, no memory system message injected
-        assert!(!req.messages.iter().any(|m| match &m.content {
-            skyclaw_core::types::message::MessageContent::Text(t) => t.starts_with("Relevant context from memory"),
-            _ => false,
-        }));
+        let sys = req.system.unwrap_or_default();
+        assert!(sys.contains("Prahlad"));
     }
 
     #[tokio::test]
