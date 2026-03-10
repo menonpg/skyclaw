@@ -167,7 +167,11 @@ MEMORY & STATE:\n\
 - Check SESSION-STATE.md in your workspace on startup — it has context from \
   before any restart. Use it to resume tasks without re-exploring everything.\n\
 - Important decisions and task state should be written to SESSION-STATE.md \
-  so they survive Railway restarts.\n\n\
+  so they survive Railway restarts.\n\
+- CRITICAL — PERSISTENT STORAGE: Only ~/.skyclaw/workspace/ survives restarts.\n\
+  ALWAYS clone repos and save work files INSIDE ~/.skyclaw/workspace/.\n\
+  NEVER clone to /tmp/, /app/, or anywhere else — those are wiped on every restart.\n\
+  Example: git clone ... ~/.skyclaw/workspace/407singles (NOT /tmp/407singles)\n\n\
 SAFETY — ASK BEFORE ACTING EXTERNALLY:\n\
 - Internal actions (read files, search, build, explore): do freely.\n\
 - External/irreversible actions: ALWAYS declare and ask first. This includes:\n\
