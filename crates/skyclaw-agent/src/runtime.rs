@@ -212,6 +212,7 @@ impl AgentRuntime {
         // Tool-use loop
         let mut rounds = 0;
         let mut interrupted = false;
+        let mut reached_max = false;
         loop {
             rounds += 1;
 
@@ -227,6 +228,7 @@ impl AgentRuntime {
             // Hard cap on tool rounds — prevents infinite loops
             if rounds > self.max_tool_rounds {
                 warn!("Exceeded maximum tool rounds ({}), forcing completion", self.max_tool_rounds);
+                reached_max = true;
                 break;
             }
 
@@ -450,12 +452,16 @@ Assistant: {}", user_content, reply_text),
             // issue more tool calls or produce a final text reply.
         }
 
-        // Fallback: loop exited due to interruption only (no hard tool-round cap).
+        // Fallback: loop exited without LLM producing a final text response
         let text = if interrupted {
             "I was interrupted to handle a new message. I'll pick up where I left off if needed.".to_string()
+        } else if reached_max {
+            format!(
+                "I hit my tool call limit ({} rounds) before finishing. Here's what I gathered so far — \
+                 let me know if you want me to continue or take a different approach.",
+                self.max_tool_rounds
+            )
         } else {
-            // Shouldn't normally reach here — the LLM should stop calling tools
-            // when done. If we do land here, ask for a synthesis.
             warn!("Tool loop exited unexpectedly — requesting synthesis");
             "Something unexpected stopped my tool loop. Please send your request again.".to_string()
         };
@@ -485,7 +491,8 @@ Assistant: {}", user_content, reply_text),
                 .and_then(|m| match &m.content { MessageContent::Text(t) => Some(t.as_str()), _ => None })
                 .unwrap_or("(unknown)"),
             if interrupted { "Interrupted mid-task (higher-priority message received)" }
-            else           { "Reached max tool rounds — task may be incomplete" },
+            else if reached_max { format!("Reached max tool rounds ({}) — task may be incomplete", self.max_tool_rounds) }
+            else           { "Unexpected exit".to_string() },
         );
         if let Err(e) = tokio::fs::write(&state_path, &state_summary).await {
             warn!("Could not write SESSION-STATE.md (fallback): {}", e);
