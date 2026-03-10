@@ -681,11 +681,30 @@ async fn main() -> Result<()> {
                                             let _ = sender.send_message(reply).await;
                                         } else {
                                             match agent.process_message(&msg, &mut session, interrupt_flag, Some(pending_for_worker.clone())).await {
-                                                Ok(reply) => {
+                                                Ok(mut reply) => {
                                                     // Persist updated session history
                                                     session_mgr_worker.update_session(session).await;
-                                                    if let Err(e) = sender.send_message(reply).await {
-                                                        tracing::error!(error = %e, "Failed to send reply");
+                                                    // Guard: Telegram rejects empty messages silently.
+                                                    // If reply is empty or whitespace, substitute a fallback.
+                                                    if reply.text.trim().is_empty() {
+                                                        tracing::warn!("Empty reply from agent — substituting fallback");
+                                                        reply.text = "I finished but my response was empty. Please try again or rephrase your request.".to_string();
+                                                    }
+                                                    // Truncate if over Telegram's 4096 char limit
+                                                    if reply.text.len() > 4000 {
+                                                        let truncated = reply.text.chars().take(3900).collect::<String>();
+                                                        reply.text = format!("{}\n\n…[truncated — reply was too long]", truncated);
+                                                    }
+                                                    if let Err(e) = sender.send_message(reply.clone()).await {
+                                                        tracing::error!(error = %e, "Failed to send reply — sending plain fallback");
+                                                        // Last resort: try sending a plain-text fallback
+                                                        let fallback = skyclaw_core::types::message::OutboundMessage {
+                                                            chat_id: reply.chat_id.clone(),
+                                                            text: format!("⚠️ Failed to deliver reply ({}). Please try again.", e),
+                                                            reply_to: reply.reply_to.clone(),
+                                                            parse_mode: None,
+                                                        };
+                                                        let _ = sender.send_message(fallback).await;
                                                     }
                                                 }
                                                 Err(e) => {
