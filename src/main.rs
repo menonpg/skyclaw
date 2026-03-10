@@ -326,7 +326,7 @@ async fn main() -> Result<()> {
             );
             tracing::info!(count = tools.len(), "Tools initialized");
 
-            // Load SOUL.md from workspace if it exists, prepend to system prompt
+            // Load SOUL.md from workspace if it exists
             let soul_content = {
                 let soul_paths = [
                     std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
@@ -338,12 +338,35 @@ async fn main() -> Result<()> {
                     .find_map(|p| std::fs::read_to_string(p).ok())
                     .unwrap_or_default()
             };
-            let system_prompt = if soul_content.is_empty() {
-                Some(SYSTEM_PROMPT.to_string())
-            } else {
-                Some(format!("{}\n\n---\n\n{}", soul_content, SYSTEM_PROMPT))
+
+            // Load MEMORY.md from workspace — injected as "long-term memory" prefix
+            let memory_content = {
+                let mem_paths = [
+                    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                        .join(".skyclaw/workspace/MEMORY.md"),
+                    std::path::PathBuf::from("MEMORY.md"),
+                ];
+                mem_paths
+                    .iter()
+                    .find_map(|p| std::fs::read_to_string(p).ok())
+                    .unwrap_or_default()
             };
-            tracing::info!(has_soul = !soul_content.is_empty(), "System prompt configured");
+
+            // Build system prompt: SOUL.md → MEMORY.md → base SYSTEM_PROMPT
+            let system_prompt = {
+                let mut parts: Vec<String> = Vec::new();
+                if !soul_content.is_empty() { parts.push(soul_content.clone()); }
+                if !memory_content.is_empty() {
+                    parts.push(format!("## Long-Term Memory (MEMORY.md)\n\n{}", memory_content));
+                }
+                parts.push(SYSTEM_PROMPT.to_string());
+                Some(parts.join("\n\n---\n\n"))
+            };
+            tracing::info!(
+                has_soul   = !soul_content.is_empty(),
+                has_memory = !memory_content.is_empty(),
+                "System prompt configured"
+            );
 
             // ── Agent state (None during onboarding) ───────────
             let agent_state: Arc<tokio::sync::RwLock<Option<Arc<skyclaw_agent::AgentRuntime>>>> =
