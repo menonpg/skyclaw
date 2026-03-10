@@ -169,17 +169,27 @@ impl AgentRuntime {
                     session_filter: Some(session.session_id.clone()),
                     ..Default::default()
                 };
-                self.memory.search(&query, opts).await.unwrap_or_default()
+                // 5-second timeout — if SoulMate is unreachable, don't hang
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    self.memory.search(&query, opts)
+                ).await {
+                    Ok(result) => result.unwrap_or_default(),
+                    Err(_) => {
+                        warn!("Memory search timed out after 5s — continuing without memories");
+                        Vec::new()
+                    }
+                }
             } else {
                 Vec::new()
             }
         };
 
         // Write a "task started" entry to SESSION-STATE.md BEFORE doing any work.
-        // If Railway restarts mid-task, the next boot reads this and knows what to resume.
+        // Fire-and-forget — never block the response on a filesystem write.
         {
             let task_preview = user_text.chars().take(200).collect::<String>();
-            let _ = &task_preview; // silence unused warning if preview is empty
+            let state_path_clone = state_path.clone();
             let started_state = format!(
                 "# Ray — Session State\n## Status\nIN PROGRESS — interrupted mid-task (Railway restart?)\n\
                  ## Task Started\n{}\n## Started At\n{}\n\
@@ -187,7 +197,9 @@ impl AgentRuntime {
                 task_preview,
                 chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"),
             );
-            let _ = tokio::fs::write(&state_path, &started_state).await;
+            tokio::spawn(async move {
+                let _ = tokio::fs::write(&state_path_clone, &started_state).await;
+            });
         }
 
         // Hard limit: send_message may be called AT MOST ONCE per user message.

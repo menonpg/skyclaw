@@ -19,8 +19,13 @@ pub struct AnthropicProvider {
 
 impl AnthropicProvider {
     pub fn new(api_key: String) -> Self {
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(120))   // 2 min max per API call
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("Failed to build HTTP client");
         Self {
-            client: Client::new(),
+            client,
             api_key,
             base_url: "https://api.anthropic.com".to_string(),
         }
