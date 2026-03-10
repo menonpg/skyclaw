@@ -316,11 +316,16 @@ Assistant: {}", user_content, reply_text),
                         session_id: Some(session.session_id.clone()),
                         entry_type: MemoryEntryType::Conversation,
                     };
-                    if let Err(e) = self.memory.store(mem_entry).await {
-                        warn!("Failed to store memory: {}", e);
-                    } else {
-                        debug!("Stored conversation turn in memory");
-                    }
+                    // Fire-and-forget — never block the Telegram reply on a
+                    // memory store. SoulMate's store() calls POST /v1/ask which
+                    // runs a full LLM pipeline server-side (5-15s). The user
+                    // should get the response immediately; memory stores in background.
+                    let memory_clone = self.memory.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = memory_clone.store(mem_entry).await {
+                            warn!("Failed to store memory (background): {}", e);
+                        }
+                    });
                 }
 
                 // Persist session state to disk so Ray survives Railway restarts.
