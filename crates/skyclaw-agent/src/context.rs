@@ -10,7 +10,7 @@ use std::sync::Arc;
 use skyclaw_core::MemoryEntry;
 use skyclaw_core::Tool;
 use skyclaw_core::types::message::{
-    ChatMessage, CompletionRequest, MessageContent, Role, ToolDefinition,
+    ChatMessage, CompletionRequest, ContentPart, MessageContent, Role, ToolDefinition,
 };
 use skyclaw_core::types::session::SessionContext;
 
@@ -80,20 +80,44 @@ pub async fn build_context(
     }
     kept.reverse();
 
-    // Strip orphaned messages from the FRONT only.
-    // The sequence must start with Role::User — never with Tool or Assistant,
-    // which would have no matching prior context in the window.
-    // (Stripping from the front is safe: we just lose some older context.)
-    //
-    // NOTE: Do NOT strip from the trailing end. A Role::Tool at the end is
-    // valid inside the tool loop (Anthropic expects: assistant+tool_use →
-    // user+tool_results → assistant...). Stripping trailing Tool would expose
-    // the preceding Assistant+tool_use with no results, which is the error we
-    // are trying to avoid.
+    // Strip orphaned messages from the FRONT.
+    // The sequence must start with Role::User.
     while !kept.is_empty() {
         match kept[0].role {
-            Role::User => break, // valid start
-            _ => { kept.remove(0); } // drop orphaned Tool/Assistant at front
+            Role::User => break,
+            _ => { kept.remove(0); }
+        }
+    }
+
+    // Strip orphaned tool_use from the END.
+    // If the token budget cut through a tool_use/tool_result pair, the last
+    // message may be assistant+tool_use with no following tool_result. That
+    // causes Anthropic 400. Remove it (and any trailing tool_result that has
+    // lost its matching tool_use) until the tail is clean.
+    loop {
+        match kept.last() {
+            Some(last) if matches!(last.role, Role::Assistant) => {
+                let has_dangling_tool_use = match &last.content {
+                    MessageContent::Parts(parts) => parts.iter().any(|p| matches!(p, ContentPart::ToolUse { .. })),
+                    _ => false,
+                };
+                if has_dangling_tool_use {
+                    tracing::warn!("context: stripping dangling assistant+tool_use from end of context window");
+                    kept.pop();
+                    // Also remove the preceding tool_result if it lost its pair
+                    if matches!(kept.last().map(|m| &m.role), Some(Role::Tool)) {
+                        kept.pop();
+                    }
+                } else {
+                    break;
+                }
+            }
+            Some(last) if matches!(last.role, Role::Tool) => {
+                // Orphaned tool_result with no preceding assistant+tool_use
+                tracing::warn!("context: stripping orphaned tool_result from end of context window");
+                kept.pop();
+            }
+            _ => break,
         }
     }
 

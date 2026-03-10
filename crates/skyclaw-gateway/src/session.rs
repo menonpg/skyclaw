@@ -122,6 +122,14 @@ impl SessionManager {
             session.history.drain(..drain_count);
         }
 
+        // After truncation the first message might be an orphaned Assistant or
+        // Tool message (their preceding User was drained away). Anthropic
+        // requires sequences to start with "user" — strip until we find one.
+        use skyclaw_core::types::message::Role;
+        while session.history.first().map(|m| !matches!(m.role, Role::User)).unwrap_or(false) {
+            session.history.remove(0);
+        }
+
         let mut sessions = self.sessions.write().await;
         sessions.insert(key.clone(), session);
         drop(sessions);

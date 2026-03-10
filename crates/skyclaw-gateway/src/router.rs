@@ -44,9 +44,21 @@ pub async fn route_message(
                     .await;
                 session.history.clear();
                 info!(chat_id = %msg.chat_id, "Session reset by user command");
+
+                // Also clear the persisted SESSION-STATE.md so the next session
+                // starts truly fresh (no stale state injected into the system prompt).
+                let state_path = session.workspace_path.join("SESSION-STATE.md");
+                if state_path.exists() {
+                    if let Err(e) = tokio::fs::remove_file(&state_path).await {
+                        tracing::warn!("Could not delete SESSION-STATE.md: {}", e);
+                    } else {
+                        info!("SESSION-STATE.md cleared by /new");
+                    }
+                }
+
                 return Ok(OutboundMessage {
                     chat_id: msg.chat_id.clone(),
-                    text: "Session cleared. Fresh start — I've forgotten everything from this conversation. My long-term memory (MEMORY.md) is still intact.".to_string(),
+                    text: "Session cleared. Fresh start — conversation history and session state are gone. Long-term memory is still intact.".to_string(),
                     reply_to: Some(msg.id.clone()),
                     parse_mode: Some(ParseMode::Plain),
                 });
