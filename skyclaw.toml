@@ -27,7 +27,7 @@ keyword_weight = 0.3
 # Keep last 20 exchange pairs in context window (~40 messages)
 max_turns = 20
 max_context_tokens = 60000
-max_tool_rounds = 200
+max_tool_rounds = 30
 
 [vault]
 backend = "local-chacha20"
