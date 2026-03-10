@@ -288,6 +288,12 @@ impl AgentRuntime {
             // If no tool calls, we have our final reply
             if tool_uses.is_empty() {
                 let reply_text = text_parts.join("\n");
+                info!(
+                    rounds = rounds,
+                    reply_len = reply_text.len(),
+                    reply_preview = %reply_text.chars().take(100).collect::<String>(),
+                    "Tool loop finished — LLM returned final text (no tool calls)"
+                );
 
                 // Record assistant reply in history
                 session.history.push(ChatMessage {
@@ -378,10 +384,12 @@ Assistant: {}", user_content, reply_text),
                 if tool_name == "send_message" {
                     if announcement_sent {
                         warn!("Extra send_message suppressed (already sent one this turn)");
+                        // Return success (is_error: false) so the model doesn't think it failed.
+                        // Gemini tends to give up when it sees tool errors.
                         tool_result_parts.push(ContentPart::ToolResult {
                             tool_use_id: tool_use_id.clone(),
-                            content: "⚠️ send_message is disabled for the rest of this task — you already sent your announcement. Do NOT call it again. Just do the work and return your answer in the final reply.".to_string(),
-                            is_error: true,
+                            content: "✓ (Message skipped — you already announced. Continue with your work, then put your findings in the final reply.)".to_string(),
+                            is_error: false,
                         });
                         continue;
                     }
