@@ -370,19 +370,36 @@ async fn main() -> Result<()> {
                     .unwrap_or_default()
             };
 
-            // Build system prompt: SOUL.md → MEMORY.md → base SYSTEM_PROMPT
+            // Load SESSION-STATE.md — hot RAM / in-progress task state
+            let session_state_content = {
+                let ss_paths = [
+                    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                        .join(".skyclaw/workspace/SESSION-STATE.md"),
+                    std::path::PathBuf::from("SESSION-STATE.md"),
+                ];
+                ss_paths
+                    .iter()
+                    .find_map(|p| std::fs::read_to_string(p).ok())
+                    .unwrap_or_default()
+            };
+
+            // Build system prompt: SOUL.md → MEMORY.md → SESSION-STATE.md → base SYSTEM_PROMPT
             let system_prompt = {
                 let mut parts: Vec<String> = Vec::new();
                 if !soul_content.is_empty() { parts.push(soul_content.clone()); }
                 if !memory_content.is_empty() {
                     parts.push(format!("## Long-Term Memory (MEMORY.md)\n\n{}", memory_content));
                 }
+                if !session_state_content.is_empty() {
+                    parts.push(format!("## Current Session State (SESSION-STATE.md)\n\n{}", session_state_content));
+                }
                 parts.push(SYSTEM_PROMPT.to_string());
                 Some(parts.join("\n\n---\n\n"))
             };
             tracing::info!(
-                has_soul   = !soul_content.is_empty(),
-                has_memory = !memory_content.is_empty(),
+                has_soul          = !soul_content.is_empty(),
+                has_memory        = !memory_content.is_empty(),
+                has_session_state = !session_state_content.is_empty(),
                 "System prompt configured"
             );
 
