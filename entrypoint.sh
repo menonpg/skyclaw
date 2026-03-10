@@ -28,5 +28,7 @@ else
     mkdir -p "$WORKSPACE_DIR"
 fi
 
-cd "$APP_DIR"
-exec ./skyclaw start
+# Start from workspace so relative paths (git clone, file writes) land
+# in the persistent volume by default, not the ephemeral /app/ directory.
+cd "$WORKSPACE_DIR"
+exec "$APP_DIR/skyclaw" start
