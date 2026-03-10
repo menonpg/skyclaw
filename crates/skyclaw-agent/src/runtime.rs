@@ -53,7 +53,7 @@ impl AgentRuntime {
             system_prompt,
             max_turns: 6,
             max_context_tokens: 30_000,
-            max_tool_rounds: 30,
+            max_tool_rounds: 50,
         }
     }
 
@@ -191,8 +191,23 @@ impl AgentRuntime {
             }
 
             if rounds > self.max_tool_rounds {
-                warn!("Exceeded maximum tool rounds ({}), forcing text reply", self.max_tool_rounds);
+                warn!("Exceeded maximum tool rounds ({}), forcing synthesis", self.max_tool_rounds);
                 break;
+            }
+
+            // At round 20, inject an efficiency nudge into the context so the
+            // model wraps up instead of continuing to explore aimlessly.
+            if rounds == 20 {
+                warn!("Tool round 20 reached — injecting efficiency nudge");
+                session.history.push(ChatMessage {
+                    role: Role::User,
+                    content: MessageContent::Text(
+                        "[SYSTEM: You have used 20 tool rounds. Focus on completing the task \
+                         with the information already gathered. Stop exploring — synthesize \
+                         and reply. Only call more tools if absolutely required to finish.]"
+                        .to_string()
+                    ),
+                });
             }
 
             // Build the completion request from full context.
