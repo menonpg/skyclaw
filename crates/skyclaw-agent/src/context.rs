@@ -121,6 +121,15 @@ pub async fn build_context(
         }
     }
 
+    // Safety: Anthropic requires at least one message.
+    // If aggressive stripping left us with nothing, use the last user message from original history.
+    if kept.is_empty() {
+        tracing::warn!("context: all messages stripped — falling back to last user message");
+        if let Some(last_user) = history.iter().rev().find(|m| matches!(m.role, Role::User)) {
+            kept.push(last_user.clone());
+        }
+    }
+
     messages.extend(kept);
 
     // 4. Build tool definitions
