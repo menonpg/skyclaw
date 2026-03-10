@@ -26,6 +26,11 @@ struct AskRequest {
     customer_id: String,
     soul_id: String,
     remember: bool,
+    // SoulMate is BYOK — the caller must supply the LLM key for server-side LLM calls
+    llm_provider: String,
+    llm_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    llm_model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +57,8 @@ pub struct SoulMateMemory {
     api_key: String,
     customer_id: String,
     soul_id: String,
+    /// The agent's own LLM key — passed to SoulMate for BYOK LLM calls
+    llm_key: String,
 }
 
 impl SoulMateMemory {
@@ -71,8 +78,6 @@ impl SoulMateMemory {
             warn!("SOULMATE_API_KEY is not set — all memory calls will fail with 401. \
                    Set this env var in Railway.");
         }
-        // Pass the agent's own LLM key so SoulMate can make LLM calls server-side
-
 
         let base_url = std::env::var("SOULMATE_URL")
             .unwrap_or_else(|_| DEFAULT_SOULMATE_URL.to_string());
@@ -84,7 +89,15 @@ impl SoulMateMemory {
             "SoulMate memory backend initialized"
         );
 
-        Ok(Self { client: Client::new(), base_url, api_key, customer_id, soul_id })
+        // SoulMate is BYOK — pass ANTHROPIC_API_KEY (or fallback to OPENAI_API_KEY)
+        let llm_key = std::env::var("ANTHROPIC_API_KEY")
+            .or_else(|_| std::env::var("OPENAI_API_KEY"))
+            .unwrap_or_default();
+        if llm_key.is_empty() {
+            warn!("No LLM key (ANTHROPIC_API_KEY/OPENAI_API_KEY) found — SoulMate store() will fail with 500.");
+        }
+
+        Ok(Self { client: Client::new(), base_url, api_key, customer_id, soul_id, llm_key })
     }
 
     fn auth_header(&self) -> String {
@@ -104,11 +117,13 @@ impl Memory for SoulMateMemory {
         );
 
         let req = AskRequest {
-            query:       content,
-            customer_id: self.customer_id.clone(),
-            soul_id:     self.soul_id.clone(),
-            remember:    true,
-
+            query:        content,
+            customer_id:  self.customer_id.clone(),
+            soul_id:      self.soul_id.clone(),
+            remember:     true,
+            llm_provider: "anthropic".to_string(),
+            llm_key:      self.llm_key.clone(),
+            llm_model:    None, // uses SoulMate default (claude-haiku-4-5)
         };
 
         let resp = self
