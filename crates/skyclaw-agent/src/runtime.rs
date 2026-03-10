@@ -490,7 +490,7 @@ Assistant: {}", user_content, reply_text),
                 .find(|m| matches!(m.role, Role::User))
                 .and_then(|m| match &m.content { MessageContent::Text(t) => Some(t.as_str()), _ => None })
                 .unwrap_or("(unknown)"),
-            if interrupted { "Interrupted mid-task (higher-priority message received)" }
+            if interrupted { "Interrupted mid-task (higher-priority message received)".to_string() }
             else if reached_max { format!("Reached max tool rounds ({}) — task may be incomplete", self.max_tool_rounds) }
             else           { "Unexpected exit".to_string() },
         );
