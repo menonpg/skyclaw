@@ -169,14 +169,14 @@ impl AgentRuntime {
                     session_filter: Some(session.session_id.clone()),
                     ..Default::default()
                 };
-                // 5-second timeout — if SoulMate is unreachable, don't hang
+                // 30-second timeout — generous for Railway cold starts / SoulMate load spikes
                 match tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
+                    std::time::Duration::from_secs(30),
                     self.memory.search(&query, opts)
                 ).await {
                     Ok(result) => result.unwrap_or_default(),
                     Err(_) => {
-                        warn!("Memory search timed out after 5s — continuing without memories");
+                        warn!("Memory search timed out after 30s — continuing without memories");
                         Vec::new()
                     }
                 }
