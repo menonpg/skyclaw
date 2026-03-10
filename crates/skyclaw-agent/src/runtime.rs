@@ -150,7 +150,7 @@ impl AgentRuntime {
         // Append the user message to session history
         session.history.push(ChatMessage {
             role: Role::User,
-            content: MessageContent::Text(user_text),
+            content: MessageContent::Text(user_text.clone()),
         });
 
         // Fetch memory ONCE per inbound message — reused across all tool rounds.
@@ -174,6 +174,21 @@ impl AgentRuntime {
                 Vec::new()
             }
         };
+
+        // Write a "task started" entry to SESSION-STATE.md BEFORE doing any work.
+        // If Railway restarts mid-task, the next boot reads this and knows what to resume.
+        {
+            let task_preview = user_text.chars().take(200).collect::<String>();
+            let _ = &task_preview; // silence unused warning if preview is empty
+            let started_state = format!(
+                "# Ray — Session State\n## Status\nIN PROGRESS — interrupted mid-task (Railway restart?)\n\
+                 ## Task Started\n{}\n## Started At\n{}\n\
+                 ## Note\nThis task was interrupted before completion. Resume it.\n",
+                task_preview,
+                chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"),
+            );
+            let _ = tokio::fs::write(&state_path, &started_state).await;
+        }
 
         // Hard limit: send_message may be called AT MOST ONCE per user message.
         // The LLM tends to call it at the start of every tool round with
