@@ -30,6 +30,28 @@ if [ -n "$GITHUB_TOKEN" ]; then
         fi
     fi
     echo "Workspace ready at $WORKSPACE_DIR"
+
+    # ── Restore work repos to persistent volume ───────────────
+    # These repos are cloned as subdirectories so they survive Railway restarts.
+    # Clone if missing; pull if already there.
+    restore_repo() {
+        local name="$1"
+        local dest="$WORKSPACE_DIR/$name"
+        if [ -d "$dest/.git" ]; then
+            echo "Repo $name exists — pulling..."
+            (cd "$dest" && git pull origin main 2>/dev/null || git pull origin master 2>/dev/null) || echo "Pull failed for $name, continuing..."
+        else
+            echo "Cloning $name into persistent volume..."
+            git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/menonpg/${name}.git" "$dest" \
+                || echo "Clone failed for $name, continuing..."
+        fi
+    }
+
+    restore_repo "407singles"
+    restore_repo "menonlab-blog"
+    # Add more work repos here as needed:
+    # restore_repo "some-other-repo"
+
 else
     echo "Warning: GITHUB_TOKEN not set, workspace sync disabled"
     mkdir -p "$WORKSPACE_DIR"
