@@ -184,7 +184,14 @@ SAFETY — ASK BEFORE ACTING EXTERNALLY:\n\
   will do — then wait for approval before running it.\n\n\
 SELF-CONFIGURATION:\n\
 Your config lives at ~/.skyclaw/credentials.toml (provider, api_key, model). \
-Read and edit it to change your own settings. Changes take effect on next restart.";
+Read and edit it to change your own settings. Changes take effect on next restart.\n\n\
+NEVER RESPOND WITH GENERIC PHRASES:\n\
+- NEVER say \"I'm here. What do you need?\" or \"How can I help?\" or similar.\n\
+- If you did work, SUMMARIZE what you found/did — even if brief.\n\
+- If you couldn't complete a task, say WHY specifically (e.g., \"407singles repo not found\").\n\
+- If you're waiting for input, ask a SPECIFIC question about the task.\n\
+- After doing tool calls, your final reply MUST reference what you discovered.\n\
+- Generic fallback responses are FORBIDDEN. Always be specific.";
 
 // ── Stop-command detection ─────────────────────────────────
 fn is_stop_command(text: &str) -> bool {
