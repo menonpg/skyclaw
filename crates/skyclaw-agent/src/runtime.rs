@@ -175,10 +175,12 @@ impl AgentRuntime {
             }
         };
 
-        // Track send_message texts sent this turn to prevent duplicate spam.
-        // Context trimming can erase tool results, making Ray think it hasn't
-        // sent a message when it has — this set prevents re-sending the same text.
-        let mut sent_messages: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Hard limit: send_message may be called AT MOST ONCE per user message.
+        // The LLM tends to call it at the start of every tool round with
+        // slightly different wording ("On it — pulling...", "On it — fetching...",
+        // etc.). Exact-text deduplication misses this since each variant is unique.
+        // A boolean is the only reliable gate.
+        let mut announcement_sent: bool = false;
 
         // Tool-use loop
         let mut rounds = 0;
@@ -338,22 +340,20 @@ Assistant: {}", user_content, reply_text),
             for (tool_use_id, tool_name, arguments) in &tool_uses {
                 info!(tool = %tool_name, id = %tool_use_id, "Executing tool call");
 
-                // Deduplicate send_message calls within a single message turn.
-                // If the same text was already sent this turn, skip and return
-                // an informational result so Ray knows it was already delivered.
+                // Hard gate: only ONE send_message allowed per user message.
+                // The LLM calls it at the start of every tool round with slight
+                // variations — exact-text dedup doesn't catch this. Boolean does.
                 if tool_name == "send_message" {
-                    if let Some(text) = arguments.get("text").and_then(|v| v.as_str()) {
-                        if sent_messages.contains(text) {
-                            warn!("Duplicate send_message suppressed: {:?}", &text[..text.len().min(60)]);
-                            tool_result_parts.push(ContentPart::ToolResult {
-                                tool_use_id: tool_use_id.clone(),
-                                content: format!("⚠️ Duplicate suppressed — this exact message was already sent this turn. Do NOT call send_message again with the same text. Proceed with your actual task."),
-                                is_error: true,
-                            });
-                            continue;
-                        }
-                        sent_messages.insert(text.to_string());
+                    if announcement_sent {
+                        warn!("Extra send_message suppressed (already sent one this turn)");
+                        tool_result_parts.push(ContentPart::ToolResult {
+                            tool_use_id: tool_use_id.clone(),
+                            content: "⚠️ send_message is disabled for the rest of this task — you already sent your announcement. Do NOT call it again. Just do the work and return your answer in the final reply.".to_string(),
+                            is_error: true,
+                        });
+                        continue;
                     }
+                    announcement_sent = true;
                 }
 
                 let result = execute_tool(tool_name, arguments.clone(), &self.tools, session).await;
