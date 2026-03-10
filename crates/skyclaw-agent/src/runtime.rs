@@ -376,12 +376,16 @@ Assistant: {}", user_content, reply_text),
                 // variations — exact-text dedup doesn't catch this. Boolean does.
                 if tool_name == "send_message" {
                     if announcement_sent {
-                        warn!("Extra send_message suppressed (already sent one this turn)");
-                        // Return success (is_error: false) so the model doesn't think it failed.
-                        // Gemini tends to give up when it sees tool errors.
+                        warn!("Extra send_message suppressed — forcing text completion");
+                        // Do NOT give a fake success that lets the model keep looping.
+                        // Give a hard instruction to STOP calling tools and return text.
                         tool_result_parts.push(ContentPart::ToolResult {
                             tool_use_id: tool_use_id.clone(),
-                            content: "✓ (Message skipped — you already announced. Continue with your work, then put your findings in the final reply.)".to_string(),
+                            content: "⛔ send_message DISABLED. You have already sent your announcement. \
+                                      STOP calling tools immediately. \
+                                      Return your complete answer RIGHT NOW as plain text — \
+                                      do NOT call any more tools. \
+                                      Just type your response. No tool calls.".to_string(),
                             is_error: false,
                         });
                         continue;
