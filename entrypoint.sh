@@ -17,10 +17,17 @@ if [ -n "$GITHUB_TOKEN" ]; then
         (cd "$WORKSPACE_DIR" && git pull origin main) || echo "Pull failed, continuing with existing workspace..."
     else
         echo "Fresh volume — cloning workspace..."
-        git clone "https://menonx:${GITHUB_TOKEN}@github.com/menonpg/ray-workspace.git" "$WORKSPACE_DIR" 2>/dev/null || {
+        # Clone to temp dir first to avoid failure when lost+found exists on fresh ext4 volume
+        TMPCLONE=$(mktemp -d)
+        if git clone "https://x-access-token:${GITHUB_TOKEN}@github.com/menonpg/ray-workspace.git" "$TMPCLONE" 2>/dev/null; then
+            cp -r "$TMPCLONE/." "$WORKSPACE_DIR/"
+            rm -rf "$TMPCLONE"
+            echo "Clone succeeded."
+        else
             echo "Clone failed, initializing empty workspace..."
+            rm -rf "$TMPCLONE"
             (cd "$WORKSPACE_DIR" && git init) || true
-        }
+        fi
     fi
     echo "Workspace ready at $WORKSPACE_DIR"
 else
