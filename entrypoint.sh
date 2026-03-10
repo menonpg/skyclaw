@@ -35,7 +35,6 @@ else
     mkdir -p "$WORKSPACE_DIR"
 fi
 
-# Start from workspace so relative paths (git clone, file writes) land
-# in the persistent volume by default, not the ephemeral /app/ directory.
-cd "$WORKSPACE_DIR"
-exec "$APP_DIR/skyclaw" start
+# Start from APP_DIR so skyclaw finds skyclaw.toml (copied there by Dockerfile)
+cd "$APP_DIR"
+exec ./skyclaw start
