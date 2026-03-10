@@ -224,20 +224,9 @@ impl AgentRuntime {
                 }
             }
 
-            // At round 20, inject an efficiency nudge into the context so the
-            // model wraps up instead of continuing to explore aimlessly.
-            if rounds == 20 {
-                warn!("Tool round 20 reached — injecting efficiency nudge");
-                session.history.push(ChatMessage {
-                    role: Role::User,
-                    content: MessageContent::Text(
-                        "[SYSTEM: You have used 20 tool rounds. Focus on completing the task \
-                         with the information already gathered. Stop exploring — synthesize \
-                         and reply. Only call more tools if absolutely required to finish.]"
-                        .to_string()
-                    ),
-                });
-            }
+            // Round-20 nudge removed — it was causing Claude to give up early
+            // with generic responses like "I'm here. What do you need?"
+            // Let the LLM work until it naturally completes or hits max_tool_rounds.
 
             // Build the completion request from full context.
             // Prepend persisted_state to system prompt on the first round only —

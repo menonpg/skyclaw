@@ -144,9 +144,7 @@ TOOL EFFICIENCY — READ THIS CAREFULLY:\n\
   Do NOT read every file in a directory. Scan indices (ls, grep, head) before full reads.\n\
 - For build tasks: plan the steps first, then execute. Don't explore aimlessly.\n\
 - If you can answer from memory or a quick search, do so without reading every file.\n\
-- Aim for under 15 tool calls for information tasks, under 30 for builds. \
-  If you are near 20 calls and not done, send_message a progress update and \
-  focus only on what's essential to finish.\n\
+- Take as many tool calls as needed to complete the task thoroughly.\n\
 - NEVER read files you don't specifically need. Grep for what you want.\n\n\
 OUTPUT RULES:\n\
 - Shell stdout/stderr is NOT visible to the user. Only your final reply and \
