@@ -175,6 +175,11 @@ impl AgentRuntime {
             }
         };
 
+        // Track send_message texts sent this turn to prevent duplicate spam.
+        // Context trimming can erase tool results, making Ray think it hasn't
+        // sent a message when it has — this set prevents re-sending the same text.
+        let mut sent_messages: std::collections::HashSet<String> = std::collections::HashSet::new();
+
         // Tool-use loop
         let mut rounds = 0;
         let mut interrupted = false;
@@ -332,6 +337,24 @@ Assistant: {}", user_content, reply_text),
 
             for (tool_use_id, tool_name, arguments) in &tool_uses {
                 info!(tool = %tool_name, id = %tool_use_id, "Executing tool call");
+
+                // Deduplicate send_message calls within a single message turn.
+                // If the same text was already sent this turn, skip and return
+                // an informational result so Ray knows it was already delivered.
+                if tool_name == "send_message" {
+                    if let Some(text) = arguments.get("text").and_then(|v| v.as_str()) {
+                        if sent_messages.contains(text) {
+                            warn!("Duplicate send_message suppressed: {:?}", &text[..text.len().min(60)]);
+                            tool_result_parts.push(ContentPart::ToolResult {
+                                tool_use_id: tool_use_id.clone(),
+                                content: format!("⚠️ Duplicate suppressed — this exact message was already sent this turn. Do NOT call send_message again with the same text. Proceed with your actual task."),
+                                is_error: true,
+                            });
+                            continue;
+                        }
+                        sent_messages.insert(text.to_string());
+                    }
+                }
 
                 let result = execute_tool(tool_name, arguments.clone(), &self.tools, session).await;
 

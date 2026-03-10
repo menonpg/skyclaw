@@ -75,7 +75,7 @@ impl Tool for SendMessageTool {
 
         match self.channel.send_message(outbound).await {
             Ok(()) => Ok(ToolOutput {
-                content: "Message sent".to_string(),
+                content: format!("✓ Message delivered: \"{}\"", &text[..text.len().min(120)]),
                 is_error: false,
             }),
             Err(e) => Ok(ToolOutput {

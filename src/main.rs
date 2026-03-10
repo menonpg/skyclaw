@@ -613,7 +613,7 @@ async fn main() -> Result<()> {
                                                     tracing::info!(chat_id = %msg.chat_id, "Session reset by /new");
                                                     Some(skyclaw_core::types::message::OutboundMessage {
                                                         chat_id: msg.chat_id.clone(),
-                                                        text: "Session cleared. Fresh start — I've forgotten this conversation. Long-term memory (MEMORY.md) is still intact.".to_string(),
+                                                        text: "Session cleared. Fresh start — conversation history and SESSION-STATE.md are gone. Long-term memory is intact.".to_string(),
                                                         reply_to: Some(msg.id.clone()),
                                                         parse_mode: Some(skyclaw_core::types::message::ParseMode::Plain),
                                                     })
