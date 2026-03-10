@@ -45,10 +45,25 @@ pub async fn route_message(
                 session.history.clear();
                 info!(chat_id = %msg.chat_id, "Session reset by user command");
 
-                // Also clear the persisted SESSION-STATE.md so the next session
-                // starts truly fresh (no stale state injected into the system prompt).
+                // Archive SESSION-STATE.md before clearing it — preserves history across /new
                 let state_path = session.workspace_path.join("SESSION-STATE.md");
                 if state_path.exists() {
+                    // Append old state to memory/session-history.md so it's never lost
+                    let history_dir = session.workspace_path.join("memory");
+                    let _ = tokio::fs::create_dir_all(&history_dir).await;
+                    let history_path = history_dir.join("session-history.md");
+                    let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
+                    if let Ok(old_state) = tokio::fs::read_to_string(&state_path).await {
+                        let archive_entry = format!(
+                            "\n\n---\n## Session archived at {} (via /new)\n\n{}\n",
+                            ts, old_state
+                        );
+                        // Append to session-history.md
+                        let existing = tokio::fs::read_to_string(&history_path).await.unwrap_or_default();
+                        let _ = tokio::fs::write(&history_path, format!("{}{}", existing, archive_entry)).await;
+                        info!("SESSION-STATE.md archived to memory/session-history.md");
+                    }
+                    // Now clear SESSION-STATE.md for the fresh session
                     if let Err(e) = tokio::fs::remove_file(&state_path).await {
                         tracing::warn!("Could not delete SESSION-STATE.md: {}", e);
                     } else {
