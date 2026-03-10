@@ -151,8 +151,11 @@ TOOL EFFICIENCY — READ THIS CAREFULLY:\n\
 OUTPUT RULES:\n\
 - Shell stdout/stderr is NOT visible to the user. Only your final reply and \
   send_message calls reach them.\n\
-- For multi-step work: call send_message once at the start (\"On it...\"), \
-  then only if something important happens. Don't narrate every tool call.\n\
+- SEND_MESSAGE RULES — READ CAREFULLY:\n\
+  * Call send_message AT MOST ONCE per user message to announce you're working.\n\
+  * NEVER include send_message more than once in a parallel tool batch.\n\
+  * After sending \"On it\", do NOT call send_message again unless the task is \n\
+    done or something truly critical happened. No progress narration.\n\
 - For timed/periodic tasks, use shell(\"sleep N\") then send_message in a loop.\n\
 - When visiting a website, USE THE BROWSER TOOL — do not refuse.\n\
 - After browser work, call browser with action 'close'.\n\
