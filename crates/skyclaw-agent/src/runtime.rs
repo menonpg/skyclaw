@@ -224,9 +224,11 @@ impl AgentRuntime {
                 }
             }
 
-            // Round-20 nudge removed — it was causing Claude to give up early
-            // with generic responses like "I'm here. What do you need?"
-            // Let the LLM work until it naturally completes or hits max_tool_rounds.
+            // Hard cap on tool rounds — prevents infinite loops
+            if rounds > self.max_tool_rounds {
+                warn!("Exceeded maximum tool rounds ({}), forcing completion", self.max_tool_rounds);
+                break;
+            }
 
             // Build the completion request from full context.
             // Prepend persisted_state to system prompt on the first round only —
