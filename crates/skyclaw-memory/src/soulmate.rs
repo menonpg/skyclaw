@@ -10,6 +10,13 @@
 //!   cheaper, no LLM call needed for retrieval.
 //! - `store()`: kept as POST /v1/ask with remember=true (correct per API spec), but now
 //!   prefixed with "Remember this:" so the LLM stores it as a fact, not a query.
+//!
+//! # Fix (2026-03-10)
+//! - `DEFAULT_SOULMATE_URL` updated to v2 (Qdrant + Azure embeddings).
+//! - `search()` now uses POST /v1/ask with remember=false — triggers semantic Qdrant
+//!   retrieval on v2 instead of returning the full flat markdown file. This means
+//!   Ray gets the 8 most semantically relevant memories injected into context, not
+//!   a raw dump of every line.
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -18,7 +25,7 @@ use skyclaw_core::error::SkyclawError;
 use skyclaw_core::{Memory, MemoryEntry, MemoryEntryType, SearchOpts};
 use tracing::{debug, info, warn};
 
-const DEFAULT_SOULMATE_URL: &str = "https://soulmate-api-production.up.railway.app";
+const DEFAULT_SOULMATE_URL: &str = "https://soulmate-api-v2.themenonlab.com";
 
 #[derive(Debug, Serialize)]
 struct AskRequest {
@@ -38,7 +45,9 @@ struct AskResponse {
     #[allow(dead_code)]
     answer: String,
     #[serde(default)]
-    memories: Vec<String>,
+    rag_hits: u32,
+    #[serde(default)]
+    retrieval: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,48 +156,79 @@ impl Memory for SoulMateMemory {
         Ok(())
     }
 
-    /// Retrieve memories via GET /v1/memory/{customer_id}.
-    /// Uses the direct memory endpoint — no LLM call needed for retrieval.
+    /// Retrieve semantically relevant memories via POST /v1/ask with remember=false.
+    ///
+    /// On v2 this triggers Qdrant vector search + Azure embeddings — returns the
+    /// top-8 most semantically similar memories for the query. No new memory is stored.
+    ///
+    /// Falls back to GET /v1/memory (flat markdown) if llm_key is empty.
     async fn search(
         &self,
-        _query: &str,
+        query: &str,
         opts: SearchOpts,
     ) -> Result<Vec<MemoryEntry>, SkyclawError> {
+        // If no LLM key, fall back to flat GET (v1-style).
+        // v2 semantic search requires an LLM call for context synthesis.
+        if self.llm_key.is_empty() || query.is_empty() {
+            return self.search_flat(opts.limit).await;
+        }
+
+        let req = AskRequest {
+            query:        query.to_string(),
+            customer_id:  self.customer_id.clone(),
+            soul_id:      self.soul_id.clone(),
+            remember:     false, // retrieve only — do NOT store this search query
+            llm_provider: "anthropic".to_string(),
+            llm_key:      self.llm_key.clone(),
+            llm_model:    Some("claude-haiku-4-5".to_string()), // fast + cheap for retrieval
+        };
+
         let resp = self
             .client
-            .get(format!("{}/v1/memory/{}", self.base_url, self.customer_id))
+            .post(format!("{}/v1/ask", self.base_url))
             .header("Authorization", self.auth_header())
+            .json(&req)
             .send()
             .await
-            .map_err(|e| SkyclawError::Memory(format!("SoulMate memory fetch failed: {e}")))?;
+            .map_err(|e| SkyclawError::Memory(format!("SoulMate semantic search failed: {e}")))?;
 
         if !resp.status().is_success() {
-            warn!(status = %resp.status(), "SoulMate memory fetch returned non-200 — returning empty");
+            let status = resp.status();
+            warn!(status = %status, "SoulMate semantic search returned non-200 — falling back to flat");
+            return self.search_flat(opts.limit).await;
+        }
+
+        let result: AskResponse = resp.json().await.map_err(|e| {
+            SkyclawError::Memory(format!("SoulMate search parse failed: {e}"))
+        })?;
+
+        debug!(
+            rag_hits = result.rag_hits,
+            retrieval = %result.retrieval,
+            "SoulMate semantic search complete"
+        );
+
+        // The answer IS the synthesized memory context — wrap it as a single entry
+        // so AgentRuntime's context builder injects it into the system prompt.
+        if result.answer.trim().is_empty()
+            || result.answer.contains("No relevant memories")
+            || result.answer.contains("No memories yet")
+        {
             return Ok(Vec::new());
         }
 
-        let result: MemoryResponse = resp.json().await.map_err(|e| {
-            SkyclawError::Memory(format!("SoulMate memory parse failed: {e}"))
-        })?;
-
-        // Split raw markdown into entries, skip headers and blank lines
-        let entries: Vec<MemoryEntry> = result
-            .content
-            .lines()
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .take(opts.limit)
-            .enumerate()
-            .map(|(i, line)| MemoryEntry {
-                id:         format!("soulmate-{i}"),
-                content:    line.to_string(),
-                metadata:   serde_json::json!({}),
-                timestamp:  chrono::Utc::now(),
-                session_id: Some(self.customer_id.clone()),
-                entry_type: MemoryEntryType::LongTerm,
-            })
-            .collect();
-
-        Ok(entries)
+        Ok(vec![MemoryEntry {
+            id:         format!("soulmate-semantic-{}", chrono::Utc::now().timestamp()),
+            content:    result.answer,
+            metadata:   serde_json::json!({
+                "rag_hits": result.rag_hits,
+                "retrieval": result.retrieval,
+                "source": "soulmate-v2"
+            }),
+            timestamp:  chrono::Utc::now(),
+            session_id: Some(self.customer_id.clone()),
+            entry_type: MemoryEntryType::LongTerm,
+        }])
     }
 
     async fn get(&self, _id: &str) -> Result<Option<MemoryEntry>, SkyclawError> {
@@ -208,11 +248,52 @@ impl Memory for SoulMateMemory {
         _session_id: &str,
         limit: usize,
     ) -> Result<Vec<MemoryEntry>, SkyclawError> {
-        self.search("", SearchOpts { limit, ..Default::default() }).await
+        self.search_flat(limit).await
     }
 
     fn backend_name(&self) -> &str {
-        "soulmate"
+        "soulmate-v2"
+    }
+}
+
+impl SoulMateMemory {
+    /// Flat memory retrieval via GET /v1/memory/{customer_id}.
+    /// Used as a fallback when semantic search isn't available.
+    async fn search_flat(&self, limit: usize) -> Result<Vec<MemoryEntry>, SkyclawError> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/memory/{}", self.base_url, self.customer_id))
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .map_err(|e| SkyclawError::Memory(format!("SoulMate memory fetch failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            warn!(status = %resp.status(), "SoulMate flat memory fetch returned non-200 — returning empty");
+            return Ok(Vec::new());
+        }
+
+        let result: MemoryResponse = resp.json().await.map_err(|e| {
+            SkyclawError::Memory(format!("SoulMate memory parse failed: {e}"))
+        })?;
+
+        let entries: Vec<MemoryEntry> = result
+            .content
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .take(limit)
+            .enumerate()
+            .map(|(i, line)| MemoryEntry {
+                id:         format!("soulmate-flat-{i}"),
+                content:    line.to_string(),
+                metadata:   serde_json::json!({"source": "soulmate-flat"}),
+                timestamp:  chrono::Utc::now(),
+                session_id: Some(self.customer_id.clone()),
+                entry_type: MemoryEntryType::LongTerm,
+            })
+            .collect();
+
+        Ok(entries)
     }
 }
 
