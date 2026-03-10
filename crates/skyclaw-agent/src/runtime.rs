@@ -53,7 +53,7 @@ impl AgentRuntime {
             system_prompt,
             max_turns: 6,
             max_context_tokens: 30_000,
-            max_tool_rounds: 50,
+            max_tool_rounds: 30,
         }
     }
 
@@ -386,11 +386,54 @@ Assistant: {}", user_content, reply_text),
             // issue more tool calls or produce a final text reply.
         }
 
-        // Fallback: exited loop due to interruption or max rounds
+        // Fallback: exited loop due to interruption or max rounds.
+        // For max-rounds, do ONE final synthesis call so the user gets an actual
+        // answer instead of a useless boilerplate message.
         let text = if interrupted {
             "I was interrupted to handle a new message. I'll pick up where I left off if needed.".to_string()
         } else {
-            "I reached the maximum number of tool execution steps. Here is what I have so far. Please let me know if you need me to continue.".to_string()
+            // Inject a synthesis instruction as the last user message, then call
+            // the provider once more (no tools) to get a real summary reply.
+            info!("Max tool rounds reached — requesting synthesis from provider");
+            let synthesis_prompt = ChatMessage {
+                role: Role::User,
+                content: MessageContent::Text(
+                    "You've reached the tool execution limit. Based on everything you've gathered \
+                     so far in this task, please give your best complete answer now. \
+                     Do not use any more tools — synthesize what you have into a useful response. \
+                     If the task is only partially done, clearly state what you completed and what \
+                     remains.".to_string()
+                ),
+            };
+            session.history.push(synthesis_prompt);
+
+            let synthesis_request = build_context(
+                session,
+                &cached_memories,
+                &[], // no tools — force a text reply
+                &self.model,
+                self.system_prompt.as_deref(),
+                self.max_turns,
+                self.max_context_tokens,
+            ).await;
+
+            match self.provider.complete(synthesis_request).await {
+                Ok(resp) => {
+                    let synthesized: String = resp.content.iter().filter_map(|p| {
+                        if let ContentPart::Text { text } = p { Some(text.as_str()) } else { None }
+                    }).collect::<Vec<_>>().join("\n");
+
+                    if !synthesized.trim().is_empty() {
+                        synthesized
+                    } else {
+                        "I reached the tool execution limit and couldn't produce a synthesis. Please try again with a more specific question.".to_string()
+                    }
+                }
+                Err(e) => {
+                    warn!("Synthesis call failed: {}", e);
+                    "I reached the tool execution limit. Please ask me to continue or narrow the task.".to_string()
+                }
+            }
         };
 
         // CRITICAL: push the fallback as an actual assistant message in history.
