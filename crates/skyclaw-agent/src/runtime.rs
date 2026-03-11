@@ -101,6 +101,17 @@ impl AgentRuntime {
             "Processing inbound message"
         );
 
+        // Read persistent session state from workspace (survives Railway restarts).
+        // Injected as a prefix to the system prompt so Ray knows where he left off.
+        let state_path = session.workspace_path.join("SESSION-STATE.md");
+        let persisted_state = match tokio::fs::read_to_string(&state_path).await {
+            Ok(content) if !content.trim().is_empty() => {
+                info!("Loaded SESSION-STATE.md from workspace ({} chars)", content.len());
+                format!("\n\n---\n## Persistent State (survived restart — context from last session)\n{}\n---\n", content.trim())
+            }
+            _ => String::new(),
+        };
+
         // Build user text — include attachment descriptions if no text provided
         let user_text = match (&msg.text, msg.attachments.is_empty()) {
             (Some(t), _) if !t.trim().is_empty() => t.clone(),
@@ -139,7 +150,7 @@ impl AgentRuntime {
         // Append the user message to session history
         session.history.push(ChatMessage {
             role: Role::User,
-            content: MessageContent::Text(user_text),
+            content: MessageContent::Text(user_text.clone()),
         });
 
         // Fetch memory ONCE per inbound message — reused across all tool rounds.
@@ -158,11 +169,39 @@ impl AgentRuntime {
                     session_filter: Some(session.session_id.clone()),
                     ..Default::default()
                 };
-                self.memory.search(&query, opts).await.unwrap_or_default()
+                // 30-second timeout — generous for Railway cold starts / SoulMate load spikes
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    self.memory.search(&query, opts)
+                ).await {
+                    Ok(result) => result.unwrap_or_default(),
+                    Err(_) => {
+                        warn!("Memory search timed out after 30s — continuing without memories");
+                        Vec::new()
+                    }
+                }
             } else {
                 Vec::new()
             }
         };
+
+        // WAL protocol: write task-started state to SESSION-STATE.md BEFORE doing any work.
+        // If Railway restarts mid-task, Ray will know what he was working on.
+        // Fire-and-forget — never block the response on a filesystem write.
+        {
+            let task_preview = user_text.chars().take(200).collect::<String>();
+            let state_path_clone = state_path.clone();
+            let started_state = format!(
+                "# Ray — Session State\n## Status\nIN PROGRESS — interrupted mid-task (Railway restart?)\n\
+                 ## Task Started\n{}\n## Started At\n{}\n\
+                 ## Note\nThis task was interrupted before completion. Resume it.\n",
+                task_preview,
+                chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"),
+            );
+            tokio::spawn(async move {
+                let _ = tokio::fs::write(&state_path_clone, &started_state).await;
+            });
+        }
 
         // Tool-use loop
         let mut rounds = 0;
@@ -184,13 +223,23 @@ impl AgentRuntime {
                 break;
             }
 
-            // Build the completion request from full context
+            // Build the completion request from full context.
+            // Inject persisted_state into system prompt on round 1 only.
+            let effective_system: Option<String> = if rounds == 1 && !persisted_state.is_empty() {
+                Some(match &self.system_prompt {
+                    Some(s) => format!("{}{}", s, persisted_state),
+                    None    => persisted_state.clone(),
+                })
+            } else {
+                self.system_prompt.clone()
+            };
+
             let request = build_context(
                 session,
                 &cached_memories,
                 &self.tools,
                 &self.model,
-                self.system_prompt.as_deref(),
+                effective_system.as_deref(),
                 self.max_turns,
                 self.max_context_tokens,
             )
@@ -229,8 +278,9 @@ impl AgentRuntime {
                     content: MessageContent::Text(reply_text.clone()),
                 });
 
-                // Persist conversation turn to memory backend
-                // so Ray remembers across container restarts
+                // Persist conversation turn to memory backend (fire-and-forget).
+                // SoulMate's store() calls POST /v1/ask which runs a full LLM pipeline
+                // server-side (5–15s). Never block the Telegram reply on this.
                 let user_content = session.history.iter().rev()
                     .find(|m| matches!(m.role, Role::User))
                     .and_then(|m| match &m.content {
@@ -243,18 +293,33 @@ impl AgentRuntime {
                     use skyclaw_core::{MemoryEntry, MemoryEntryType};
                     let mem_entry = MemoryEntry {
                         id: uuid::Uuid::new_v4().to_string(),
-                        content: format!("User: {}
-Assistant: {}", user_content, reply_text),
+                        content: format!("User: {}\nAssistant: {}", user_content, reply_text),
                         metadata: serde_json::json!({"chat_id": msg.chat_id, "channel": msg.channel}),
                         timestamp: chrono::Utc::now(),
                         session_id: Some(session.session_id.clone()),
                         entry_type: MemoryEntryType::Conversation,
                     };
-                    if let Err(e) = self.memory.store(mem_entry).await {
-                        warn!("Failed to store memory: {}", e);
-                    } else {
-                        debug!("Stored conversation turn in memory");
-                    }
+                    let memory_clone = self.memory.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = memory_clone.store(mem_entry).await {
+                            warn!("Failed to store memory (background): {}", e);
+                        }
+                    });
+                }
+
+                // Update SESSION-STATE.md to reflect completed task.
+                let state_summary = format!(
+                    "# Ray — Session State\n\
+                     _Updated after every reply. Read on startup to restore context._\n\n\
+                     ## Last Active\n{}\n\n\
+                     ## Last User Message\n{}\n\n\
+                     ## Last Response (first 600 chars)\n{}\n",
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"),
+                    user_content,
+                    &reply_text.chars().take(600).collect::<String>(),
+                );
+                if let Err(e) = tokio::fs::write(&state_path, &state_summary).await {
+                    warn!("Could not write SESSION-STATE.md: {}", e);
                 }
 
                 return Ok(OutboundMessage {
@@ -344,7 +409,10 @@ Assistant: {}", user_content, reply_text),
         let text = if interrupted {
             "I was interrupted to handle a new message. I'll pick up where I left off if needed.".to_string()
         } else {
-            "I reached the maximum number of tool execution steps. Here is what I have so far. Please let me know if you need me to continue.".to_string()
+            format!(
+                "I reached the maximum number of tool steps ({} rounds). Here's what I have so far — let me know if you want me to continue.",
+                self.max_tool_rounds
+            )
         };
 
         // CRITICAL: push the fallback as an actual assistant message in history.
@@ -355,6 +423,15 @@ Assistant: {}", user_content, reply_text),
             role: Role::Assistant,
             content: MessageContent::Text(text.clone()),
         });
+
+        // Write fallback state so Ray knows what happened on next startup.
+        let state_summary = format!(
+            "# Ray — Session State\n## Status\n{}\n## Last Active\n{}\n",
+            if interrupted { "Interrupted mid-task".to_string() }
+            else { format!("Hit max tool rounds ({})", self.max_tool_rounds) },
+            chrono::Utc::now().format("%Y-%m-%d %H:%M UTC"),
+        );
+        let _ = tokio::fs::write(&state_path, &state_summary).await;
 
         Ok(OutboundMessage {
             chat_id: msg.chat_id.clone(),

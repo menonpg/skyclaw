@@ -5,11 +5,15 @@
 //! # Fix (2026-03-08)
 //! - `store()`: was silently failing due to missing SOULMATE_API_KEY env var defaulting
 //!   to empty string → 401 on every call. Now warns loudly if key is missing.
-//! - `search()` / `get_session_history()`: were calling POST /v1/ask (full LLM pipeline)
-//!   just to retrieve memories. Replaced with GET /v1/memory/{customer_id} — faster,
-//!   cheaper, no LLM call needed for retrieval.
-//! - `store()`: kept as POST /v1/ask with remember=true (correct per API spec), but now
-//!   prefixed with "Remember this:" so the LLM stores it as a fact, not a query.
+//! - `store()`: now uses POST /v1/ask with remember=true + BYOK llm_key.
+//!   Prefixed with "Remember this:" so the LLM stores it as a fact, not a query.
+//! - `search()`: uses GET /v1/memory/{customer_id} — fast flat retrieval, no LLM call.
+//!   Raw lines injected directly into Ray's context; his own reasoning does the synthesis.
+//!
+//! # Fix (2026-03-10)
+//! - DEFAULT_SOULMATE_URL updated to v2 (Qdrant + Azure embeddings).
+//! - llm_key (ANTHROPIC_API_KEY) now passed in AskRequest — SoulMate is BYOK.
+//! - store() is called fire-and-forget from runtime.rs — never blocks the Telegram reply.
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -18,7 +22,7 @@ use skyclaw_core::error::SkyclawError;
 use skyclaw_core::{Memory, MemoryEntry, MemoryEntryType, SearchOpts};
 use tracing::{debug, info, warn};
 
-const DEFAULT_SOULMATE_URL: &str = "https://soulmate-api-production.up.railway.app";
+const DEFAULT_SOULMATE_URL: &str = "https://soulmate-api-v2.themenonlab.com";
 
 #[derive(Debug, Serialize)]
 struct AskRequest {
@@ -26,14 +30,8 @@ struct AskRequest {
     customer_id: String,
     soul_id: String,
     remember: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct AskResponse {
-    #[allow(dead_code)]
-    answer: String,
-    #[serde(default)]
-    memories: Vec<String>,
+    llm_provider: String,
+    llm_key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +50,7 @@ pub struct SoulMateMemory {
     api_key: String,
     customer_id: String,
     soul_id: String,
+    llm_key: String,
 }
 
 impl SoulMateMemory {
@@ -68,23 +67,28 @@ impl SoulMateMemory {
 
         let api_key = std::env::var("SOULMATE_API_KEY").unwrap_or_default();
         if api_key.is_empty() {
-            warn!("SOULMATE_API_KEY is not set — all memory calls will fail with 401. \
-                   Set this env var in Railway.");
+            warn!("SOULMATE_API_KEY is not set — all memory calls will fail with 401.");
         }
-        // Pass the agent's own LLM key so SoulMate can make LLM calls server-side
-
 
         let base_url = std::env::var("SOULMATE_URL")
             .unwrap_or_else(|_| DEFAULT_SOULMATE_URL.to_string());
+
+        // SoulMate is BYOK — pass the agent's own LLM key so it can make LLM calls server-side.
+        let llm_key = std::env::var("ANTHROPIC_API_KEY")
+            .or_else(|_| std::env::var("OPENAI_API_KEY"))
+            .unwrap_or_default();
+        if llm_key.is_empty() {
+            warn!("No LLM key found (ANTHROPIC_API_KEY / OPENAI_API_KEY) — SoulMate store() will fail.");
+        }
 
         info!(
             customer_id = %customer_id,
             soul_id     = %soul_id,
             base_url    = %base_url,
-            "SoulMate memory backend initialized"
+            "SoulMate memory backend initialized (v2)"
         );
 
-        Ok(Self { client: Client::new(), base_url, api_key, customer_id, soul_id })
+        Ok(Self { client: Client::new(), base_url, api_key, customer_id, soul_id, llm_key })
     }
 
     fn auth_header(&self) -> String {
@@ -94,7 +98,7 @@ impl SoulMateMemory {
 
 #[async_trait]
 impl Memory for SoulMateMemory {
-    /// Store a memory entry via POST /v1/ask with remember=true.
+    /// Store a memory entry via POST /v1/ask with remember=true (BYOK).
     async fn store(&self, entry: MemoryEntry) -> Result<(), SkyclawError> {
         let content = format!(
             "Remember this: [{}] {}: {}",
@@ -104,11 +108,12 @@ impl Memory for SoulMateMemory {
         );
 
         let req = AskRequest {
-            query:       content,
-            customer_id: self.customer_id.clone(),
-            soul_id:     self.soul_id.clone(),
-            remember:    true,
-
+            query:        content,
+            customer_id:  self.customer_id.clone(),
+            soul_id:      self.soul_id.clone(),
+            remember:     true,
+            llm_provider: "anthropic".to_string(),
+            llm_key:      self.llm_key.clone(),
         };
 
         let resp = self
@@ -133,7 +138,9 @@ impl Memory for SoulMateMemory {
     }
 
     /// Retrieve memories via GET /v1/memory/{customer_id}.
-    /// Uses the direct memory endpoint — no LLM call needed for retrieval.
+    ///
+    /// Fast flat retrieval — no LLM call in the hot path. Raw memory lines are
+    /// injected directly into Ray's context; his own reasoning handles synthesis.
     async fn search(
         &self,
         _query: &str,
@@ -148,7 +155,7 @@ impl Memory for SoulMateMemory {
             .map_err(|e| SkyclawError::Memory(format!("SoulMate memory fetch failed: {e}")))?;
 
         if !resp.status().is_success() {
-            warn!(status = %resp.status(), "SoulMate memory fetch returned non-200 — returning empty");
+            warn!(status = %resp.status(), "SoulMate memory fetch returned non-200 — no memories injected");
             return Ok(Vec::new());
         }
 
@@ -156,7 +163,6 @@ impl Memory for SoulMateMemory {
             SkyclawError::Memory(format!("SoulMate memory parse failed: {e}"))
         })?;
 
-        // Split raw markdown into entries, skip headers and blank lines
         let entries: Vec<MemoryEntry> = result
             .content
             .lines()
@@ -166,13 +172,14 @@ impl Memory for SoulMateMemory {
             .map(|(i, line)| MemoryEntry {
                 id:         format!("soulmate-{i}"),
                 content:    line.to_string(),
-                metadata:   serde_json::json!({}),
+                metadata:   serde_json::json!({"source": "soulmate-v2-flat"}),
                 timestamp:  chrono::Utc::now(),
                 session_id: Some(self.customer_id.clone()),
                 entry_type: MemoryEntryType::LongTerm,
             })
             .collect();
 
+        debug!(count = entries.len(), "SoulMate flat memory loaded");
         Ok(entries)
     }
 
@@ -197,7 +204,7 @@ impl Memory for SoulMateMemory {
     }
 
     fn backend_name(&self) -> &str {
-        "soulmate"
+        "soulmate-v2"
     }
 }
 

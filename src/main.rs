@@ -157,8 +157,20 @@ SELF-CONFIGURATION:\n\
 Your config lives at ~/.skyclaw/credentials.toml (provider, api_key, model). \
 You can read and edit this file to change your own settings. For example, \
 if the user says 'change model to claude-opus-4-6', edit credentials.toml \
-and confirm. Changes take effect on next restart. Tell the user they can \
-configure you through natural language — just ask.";
+and confirm. Changes take effect on next restart. Tell the user they can \configure you through natural language — just ask.\n\n\
+SAFETY — ASK BEFORE ACTING EXTERNALLY:\n\
+- Internal actions (read files, search, build, explore): do freely.\n\
+- External/irreversible actions: ALWAYS declare and ask first. This includes:\n\
+  * Sending emails, tweets, or any public post\n\
+  * Pushing to git repos unless explicitly instructed\n\
+  * Deleting or overwriting files you weren't explicitly asked to change\n\
+  * Making API calls that cost money or have side effects\n\n\
+MEMORY & STATE:\n\
+- SESSION-STATE.md in your workspace has context from before any restart.\n\
+  Use it to resume tasks without re-exploring everything.\n\
+- CRITICAL — PERSISTENT STORAGE: Only ~/.skyclaw/workspace/ survives restarts.\n\
+  ALWAYS clone repos and save work files INSIDE ~/.skyclaw/workspace/.\n\
+  NEVER clone to /tmp/, /app/, or anywhere else — those are wiped on restart.";
 
 // ── Stop-command detection ─────────────────────────────────
 fn is_stop_command(text: &str) -> bool {
@@ -330,12 +342,45 @@ async fn main() -> Result<()> {
                     .find_map(|p| std::fs::read_to_string(p).ok())
                     .unwrap_or_default()
             };
-            let system_prompt = if soul_content.is_empty() {
-                Some(SYSTEM_PROMPT.to_string())
-            } else {
-                Some(format!("{}\n\n---\n\n{}", soul_content, SYSTEM_PROMPT))
+            // Load MEMORY.md from workspace — long-term memory prefix
+            let memory_content = {
+                let mem_paths = [
+                    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                        .join(".skyclaw/workspace/MEMORY.md"),
+                    std::path::PathBuf::from("MEMORY.md"),
+                ];
+                mem_paths.iter().find_map(|p| std::fs::read_to_string(p).ok()).unwrap_or_default()
             };
-            tracing::info!(has_soul = !soul_content.is_empty(), "System prompt configured");
+
+            // Load SESSION-STATE.md — hot RAM / in-progress task state
+            let session_state_content = {
+                let ss_paths = [
+                    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+                        .join(".skyclaw/workspace/SESSION-STATE.md"),
+                    std::path::PathBuf::from("SESSION-STATE.md"),
+                ];
+                ss_paths.iter().find_map(|p| std::fs::read_to_string(p).ok()).unwrap_or_default()
+            };
+
+            // Build system prompt: SOUL.md → MEMORY.md → SESSION-STATE.md → base SYSTEM_PROMPT
+            let system_prompt = {
+                let mut parts: Vec<String> = Vec::new();
+                if !soul_content.is_empty() { parts.push(soul_content.clone()); }
+                if !memory_content.is_empty() {
+                    parts.push(format!("## Long-Term Memory (MEMORY.md)\n\n{}", memory_content));
+                }
+                if !session_state_content.is_empty() {
+                    parts.push(format!("## Current Session State (SESSION-STATE.md)\n\n{}", session_state_content));
+                }
+                parts.push(SYSTEM_PROMPT.to_string());
+                Some(parts.join("\n\n---\n\n"))
+            };
+            tracing::info!(
+                has_soul          = !soul_content.is_empty(),
+                has_memory        = !memory_content.is_empty(),
+                has_session_state = !session_state_content.is_empty(),
+                "System prompt configured"
+            );
 
             // ── Agent state (None during onboarding) ───────────
             let agent_state: Arc<tokio::sync::RwLock<Option<Arc<skyclaw_agent::AgentRuntime>>>> =
@@ -576,13 +621,34 @@ async fn main() -> Result<()> {
                                             let cmd = cmd.split_whitespace().next().unwrap_or("");
                                             match cmd {
                                                 "/new" | "/reset" | "/clear" => {
+                                                    // Archive SESSION-STATE.md to memory/session-history.md
+                                                    // before clearing, so past state is preserved across resets.
+                                                    {
+                                                        let ss_path = workspace_path.join("SESSION-STATE.md");
+                                                        let archive_path = workspace_path.join("memory").join("session-history.md");
+                                                        if let Ok(state) = tokio::fs::read_to_string(&ss_path).await {
+                                                            if !state.trim().is_empty() {
+                                                                let _ = tokio::fs::create_dir_all(workspace_path.join("memory")).await;
+                                                                let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
+                                                                let archived = format!("\n\n---\n<!-- archived {} -->\n{}",
+                                                                    timestamp, state.trim());
+                                                                if let Ok(existing) = tokio::fs::read_to_string(&archive_path).await {
+                                                                    let _ = tokio::fs::write(&archive_path,
+                                                                        format!("{}{}", existing, archived)).await;
+                                                                } else {
+                                                                    let _ = tokio::fs::write(&archive_path, archived.trim_start()).await;
+                                                                }
+                                                                tracing::info!("Archived SESSION-STATE.md to session-history.md");
+                                                            }
+                                                        }
+                                                    }
                                                     session_mgr_worker
                                                         .remove_session(&msg.channel, &msg.chat_id, &msg.user_id)
                                                         .await;
                                                     tracing::info!(chat_id = %msg.chat_id, "Session reset by /new");
                                                     Some(skyclaw_core::types::message::OutboundMessage {
                                                         chat_id: msg.chat_id.clone(),
-                                                        text: "Session cleared. Fresh start — I've forgotten this conversation. Long-term memory (MEMORY.md) is still intact.".to_string(),
+                                                        text: "Session cleared. Fresh start — conversation history and SESSION-STATE.md are gone. Long-term memory is intact.".to_string(),
                                                         reply_to: Some(msg.id.clone()),
                                                         parse_mode: Some(skyclaw_core::types::message::ParseMode::Plain),
                                                     })
